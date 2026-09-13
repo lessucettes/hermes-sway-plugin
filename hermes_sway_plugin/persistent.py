@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import fcntl
+import fnmatch
 import hashlib
 import json
 import math
@@ -613,14 +614,17 @@ class ManagedRuleStore:
         )
 
     def _conflicts(self, new_rule: Mapping[str, Any]) -> tuple[IncludeConflict, ...]:
-        """Refuse competing external rule statements unless explicitly allowed."""
+        """Refuse competing *external* rule statements unless explicitly allowed.
 
-        sentinel = self.paths.config_dir / (self.paths.include.name + ".scan-sentinel")
-        found = scan_include_conflicts(self.paths.main_config, managed_include=sentinel)
-        return tuple(
-            conflict
-            for conflict in found
-            if not (conflict.kind == "unscannable_include" and conflict.text.strip() == "include " + str(self.paths.include))
+        The plugin-owned includes are never external: their statements are managed
+        by this store, and the include lines themselves are configuration the user
+        was instructed to add.
+        """
+
+        return scan_include_conflicts(
+            self.paths.main_config,
+            managed_include=self.paths.include,
+            owned_includes=(self.paths.config_dir / _STARTUP_CONFIG_NAME,),
         )
 
     def add(self, rule: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
@@ -870,7 +874,35 @@ def write_managed_include(
             candidate.unlink(missing_ok=True)
 
 
-def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Path) -> tuple[IncludeConflict, ...]:
+def _owned_include_match(directory: Path, target: str, owned_paths: set[Path]) -> bool:
+    """True when an include target names one of the plugin-owned files.
+
+    Both the documented glob (``~/.config/sway/hermes/*.conf``) and an explicit
+    absolute or relative path are recognised, so the plugin never reports its own
+    include line as an external conflict.
+    """
+
+    expanded = os.path.expanduser(target)
+    if any(character in expanded for character in "*?["):
+        pattern = Path(expanded)
+        if not pattern.is_absolute():
+            pattern = directory / expanded
+        return any(fnmatch.fnmatch(str(candidate), str(pattern)) for candidate in owned_paths)
+    candidate = Path(expanded)
+    if not candidate.is_absolute():
+        candidate = directory / expanded
+    try:
+        return candidate.resolve() in owned_paths
+    except OSError:
+        return False
+
+
+def scan_include_conflicts(
+    main_config: str | Path,
+    *,
+    managed_include: str | Path,
+    owned_includes: tuple[str | Path, ...] = (),
+) -> tuple[IncludeConflict, ...]:
     """Conservatively scan literal includes without invoking a shell or Sway.
 
     Variable/glob/absolute includes are reported as unscannable rather than
@@ -879,12 +911,13 @@ def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Pa
 
     root = Path(main_config)
     owned = Path(managed_include).resolve()
+    owned_paths = {owned, *(Path(item).resolve() for item in owned_includes)}
     found: list[IncludeConflict] = []
     visited: set[Path] = set()
 
     def visit(path: Path) -> None:
         path = path.resolve()
-        if path in visited or path == owned:
+        if path in visited or path in owned_paths:
             return
         visited.add(path)
         try:
@@ -904,11 +937,13 @@ def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Pa
             if not lowered.startswith("include "):
                 continue
             target = statement[8:].strip()
+            if target and _owned_include_match(path.parent, target, owned_paths):
+                continue
             if not target or target.startswith("/") or any(token in target for token in ("$", "~", "*", "?", "[", "]")):
                 found.append(IncludeConflict("unscannable_include", path, number, raw))
                 continue
             candidate = (path.parent / target).resolve()
-            if candidate == owned:
+            if candidate in owned_paths:
                 continue
             visit(candidate)
 
