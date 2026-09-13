@@ -132,6 +132,21 @@ cp ~/.config/sway/hermes/hermes-sway-plugin-rules.conf.bak.1 \
    ~/.config/sway/hermes/hermes-sway-plugin-rules.conf && swaymsg reload
 ```
 
+### Generated statements
+
+Rule rendering is deliberately conservative, and the exact forms are verified in
+disposable Sway 1.9 sessions:
+
+- a workspace destination renders as `assign [criteria] workspace number N`
+  (named workspaces stay quoted), because `for_window ... move container to
+  workspace` regularly leaves the window on the focused workspace;
+- centering a floating container re-parents it to the focused workspace, so when
+  a destination and `center` are both requested the destination move is re-issued
+  as the last statement of the rule body;
+- an output destination renders as `for_window ... move container to output`;
+- `workspace_output` resources aggregate into one `workspace ... output ...` line
+  with outputs in priority order.
+
 ### Example: place a chat client
 
 ```jsonc
@@ -220,6 +235,21 @@ Sway 1.9; outputs=1; workspaces=2; windows=3
 Behaviors that cannot be asserted headlessly (real placement after a session
 restart, reload-timeout recovery on a disposable configuration) are described
 under *Limitations* rather than claimed by the automated suite.
+
+To verify behavior against a real compositor without disturbing the running
+session, start a disposable headless Sway with its own socket and runtime
+directory:
+
+```bash
+runtime=$(mktemp -d)
+WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=2 \
+  XDG_RUNTIME_DIR="$runtime" SWAYSOCK="$runtime/sway.sock" \
+  sway -c /path/to/disposable/config &
+SWAYSOCK="$runtime/sway.sock" swaymsg -t get_tree
+```
+
+This is how rule placement, `exec` versus `exec_always`, and close verification
+were checked without restarting a live desktop.
 
 ## License
 
