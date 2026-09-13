@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-sway-plugin"
+version = "0.1.0"
+description = "Native Hermes plugin for Sway 1.9"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Hermes Sway Plugin Contributors"}]
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["hermes_sway_plugin*"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
