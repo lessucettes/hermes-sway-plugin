@@ -98,7 +98,59 @@ class RuntimeService:
                 )
             return {"action": action, "con_id": node.id, "orientation": orientation, "warnings": warnings}
 
+        if action == "swap":
+            return self._swap(before, node, arguments.get("other_target"), warnings)
+
         raise SwayPluginError("invalid_argument", "unsupported layout action", {"action": action})
+
+    def _swap(
+        self,
+        before: tree.Snapshot,
+        node: tree.NodeSummary,
+        other_target: object,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        """Swap two non-nested containers and prove they exchanged tree slots."""
+        other = resolve_target(before, other_target, window_only=False)
+        if other.id == node.id:
+            raise SwayPluginError("precondition_failed", "swap requires two distinct containers", {"con_id": node.id})
+        if other.id in node.ancestor_ids or node.id in other.ancestor_ids:
+            raise SwayPluginError(
+                "precondition_failed",
+                "swap cannot exchange an ancestor with its descendant",
+                {"con_id": node.id, "other_con_id": other.id},
+            )
+        target_slot = self._slot(before, node.id)
+        other_slot = self._slot(before, other.id)
+        self._run(f"{commands.criterion_for_con_id(node.id)} swap container with con_id {other.id}")
+        after = self._post_snapshot()
+        if after.node(node.id) is None or after.node(other.id) is None:
+            raise SwayPluginError(
+                "postcondition_failed",
+                "a swap target disappeared while verifying the mutation",
+                {"con_id": node.id, "other_con_id": other.id},
+            )
+        if self._slot(after, node.id) != other_slot or self._slot(after, other.id) != target_slot:
+            raise SwayPluginError(
+                "postcondition_failed",
+                "containers did not exchange their exact tree positions",
+                {"con_id": node.id, "other_con_id": other.id},
+            )
+        return {"action": "swap", "con_id": node.id, "other_con_id": other.id, "warnings": warnings}
+
+    @staticmethod
+    def _slot(snapshot: tree.Snapshot, con_id: int) -> tuple[int, int] | None:
+        """Return a container's immediate parent and child index, if live."""
+        node = snapshot.node(con_id)
+        if node is None or node.parent_id is None:
+            return None
+        parent = snapshot.node(node.parent_id)
+        if parent is None:
+            return None
+        try:
+            return parent.id, parent.child_ids.index(con_id)
+        except ValueError:
+            return None
 
     def window(self, target: object, action: str, **arguments: Any) -> dict[str, Any]:
         """Apply one window mutation and assert its observable postcondition."""
