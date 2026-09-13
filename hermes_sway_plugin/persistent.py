@@ -562,6 +562,17 @@ class ManagedRuleStore:
             if candidate is not None:
                 candidate.unlink(missing_ok=True)
 
+    def _conflicts(self, new_rule: Mapping[str, Any]) -> tuple[IncludeConflict, ...]:
+        """Refuse competing external rule statements unless explicitly allowed."""
+
+        sentinel = self.paths.config_dir / (self.paths.include.name + ".scan-sentinel")
+        found = scan_include_conflicts(self.paths.main_config, managed_include=sentinel)
+        return tuple(
+            conflict
+            for conflict in found
+            if not (conflict.kind == "unscannable_include" and conflict.text.strip() == "include " + str(self.paths.include))
+        )
+
     def add(self, rule: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
         created = normalize_managed_rule(rule)
         existing = self.list()
