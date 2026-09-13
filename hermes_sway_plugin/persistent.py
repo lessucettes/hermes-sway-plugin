@@ -10,7 +10,9 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 _MANAGED_MARKER = "# hermes-sway-plugin: managed-v1"
@@ -38,6 +40,18 @@ class RuleRenderError(PersistentConfigError):
     """A persistent rule is incomplete or cannot be rendered safely."""
 
 
+class CardinalityError(PersistentConfigError):
+    """The current desktop cannot verify a rule's intended cardinality."""
+
+
+@dataclass(frozen=True)
+class IncludeConflict:
+    kind: str
+    source: Path
+    line: int
+    text: str
+
+
 @dataclass(frozen=True)
 class ManagedConfig:
     """The verified metadata and Sway body from one managed include."""
@@ -45,6 +59,14 @@ class ManagedConfig:
     metadata: dict[str, Any]
     body: str
     digest: str
+
+
+@dataclass(frozen=True)
+class CardinalityAudit:
+    intended: str
+    match_count: int
+    matched_indices: tuple[int, ...]
+    verified: bool
 
 
 def _canonical_metadata(metadata: Mapping[str, Any]) -> str:
@@ -298,3 +320,91 @@ def render_rule(rule: Mapping[str, Any]) -> str:
     if kind == "workspace_output":
         return render_workspace_output_rule(payload)
     raise RuleRenderError("rule kind must be window or workspace_output")
+
+
+def audit_cardinality(
+    match: Mapping[str, Any], intended: str, windows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...], *, require_verified: bool = False
+) -> CardinalityAudit:
+    """Audit declarative matching against supplied current-window snapshots."""
+
+    if intended not in {"one", "many"}:
+        raise CardinalityError("intended cardinality must be one or many")
+    # Validate exactly the same matcher accepted by the renderer before use.
+    render_criteria(match)
+    matched: list[int] = []
+    for index, window in enumerate(windows):
+        if not isinstance(window, Mapping):
+            raise CardinalityError("window snapshots must be objects")
+        matched_window = True
+        for key, specification in match.items():
+            value = window.get(key)
+            expected = specification if isinstance(specification, str) else specification.get("value")
+            mode = "exact" if isinstance(specification, str) else specification.get("mode", "exact")
+            if not isinstance(value, str) or not isinstance(expected, str):
+                matched_window = False
+                break
+            if mode == "exact" and value != expected:
+                matched_window = False
+                break
+            if mode == "regex":
+                try:
+                    if re.search(expected, value) is None:
+                        matched_window = False
+                        break
+                except re.error as exc:
+                    raise CardinalityError(f"invalid regex for {key}: {exc}") from exc
+        if matched_window:
+            matched.append(index)
+    count = len(matched)
+    verified = count == 1 if intended == "one" else count >= 1
+    audit = CardinalityAudit(intended, count, tuple(matched), verified)
+    if require_verified and not verified:
+        expectation = "one" if intended == "one" else "one or more"
+        raise CardinalityError(f"expected {expectation} matching current window(s), found {count}")
+    return audit
+
+
+def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Path) -> tuple[IncludeConflict, ...]:
+    """Conservatively scan literal includes without invoking a shell or Sway.
+
+    Variable/glob/absolute includes are reported as unscannable rather than
+    expanded.  The plugin-owned include itself is intentionally not inspected.
+    """
+
+    root = Path(main_config)
+    owned = Path(managed_include).resolve()
+    found: list[IncludeConflict] = []
+    visited: set[Path] = set()
+
+    def visit(path: Path) -> None:
+        path = path.resolve()
+        if path in visited or path == owned:
+            return
+        visited.add(path)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            found.append(IncludeConflict("unreadable_include", path, 0, str(path)))
+            return
+        for number, raw in enumerate(lines, 1):
+            statement = raw.strip()
+            if not statement or statement.startswith("#"):
+                continue
+            lowered = statement.casefold()
+            if lowered.startswith("for_window "):
+                found.append(IncludeConflict("for_window", path, number, raw))
+            elif lowered.startswith("assign ") or lowered.startswith("workspace ") and " output " in lowered:
+                found.append(IncludeConflict("workspace_output", path, number, raw))
+            if not lowered.startswith("include "):
+                continue
+            target = statement[8:].strip()
+            if not target or target.startswith("/") or any(token in target for token in ("$", "~", "*", "?", "[", "]")):
+                found.append(IncludeConflict("unscannable_include", path, number, raw))
+                continue
+            candidate = (path.parent / target).resolve()
+            if candidate == owned:
+                continue
+            visit(candidate)
+
+    visit(root)
+    return tuple(found)
