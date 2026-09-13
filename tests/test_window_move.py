@@ -29,3 +29,14 @@ def test_move_to_workspace_uses_exact_name_and_verifies_the_destination():
 
     assert result == {"con_id": 103, "action": "move_to_workspace", "warnings": []}
     assert client.commands == ['[con_id=103] move container to workspace "1"']
+
+
+def test_move_to_output_uses_exact_name_and_verifies_the_destination():
+    before = load_fixture("tree_mixed.json")
+    after = moved_window_tree(before, 101, 96)
+    client = RuntimeClient([before, after])
+
+    result = RuntimeService(client).window({"con_id": 101}, "move_to_output", output="DP-2")
+
+    assert result == {"con_id": 101, "action": "move_to_output", "warnings": []}
+    assert client.commands == ['[con_id=101] move container to output "DP-2"']

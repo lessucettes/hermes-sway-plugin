@@ -35,6 +35,7 @@ class RuntimeService:
         criterion = commands.criterion_for_con_id(node.id)
         warnings: list[str] = []
         workspace: str | None = None
+        output: str | None = None
         if action == "focus":
             command = f"{criterion} focus"
         elif action == "move_to_workspace":
@@ -42,6 +43,11 @@ class RuntimeService:
             if not isinstance(workspace, str) or not workspace:
                 raise SwayPluginError("invalid_argument", "workspace must be a non-empty string")
             command = f"{criterion} move container to workspace {commands.quote(workspace)}"
+        elif action == "move_to_output":
+            output = arguments.get("output")
+            if not isinstance(output, str) or not output:
+                raise SwayPluginError("invalid_argument", "output must be a non-empty string")
+            command = f"{criterion} move container to output {commands.quote(output)}"
         else:
             raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
 
@@ -56,11 +62,17 @@ class RuntimeService:
                     "window did not become focused after the command",
                     {"con_id": node.id, "action": action},
                 )
-        elif current is None or current.workspace != workspace:
+        elif action == "move_to_workspace" and (current is None or current.workspace != workspace):
             raise SwayPluginError(
                 "postcondition_failed",
                 "window did not move to the requested workspace",
                 {"con_id": node.id, "workspace": workspace},
+            )
+        elif action == "move_to_output" and (current is None or current.output != output):
+            raise SwayPluginError(
+                "postcondition_failed",
+                "window did not move to the requested output",
+                {"con_id": node.id, "output": output},
             )
         return {"con_id": node.id, "action": action, "warnings": warnings}
 
