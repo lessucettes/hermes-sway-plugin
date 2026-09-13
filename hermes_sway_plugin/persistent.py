@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shlex
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -57,6 +58,10 @@ class AtomicWriteError(PersistentConfigError):
 
 class ReloadRollbackError(PersistentConfigError):
     """Sway did not confirm a reload and restoration could not be confirmed."""
+
+
+class DuplicateStartupEntry(PersistentConfigError):
+    """A managed startup command duplicates an existing normalized command."""
 
 
 @dataclass(frozen=True)
@@ -546,21 +551,15 @@ class ManagedRuleStore:
             raise ConfigValidationError(f"configuration does not exist: {self.paths.main_config}")
         content = render_managed_rules(rules)
         self.paths.config_dir.mkdir(parents=True, exist_ok=True)
-        candidate: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", dir=self.paths.config_dir, prefix=_RULE_CONFIG_NAME + ".candidate.", delete=False
-            ) as handle:
-                candidate = Path(handle.name)
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            validate_candidate_and_main(candidate, self.paths.main_config, subprocess_run, sway_binary=sway_binary)
-            writer = atomic_replace if atomic_replace_fn is None else atomic_replace_fn
-            return writer(self.paths.include, content, backup_count=backup_count)
-        finally:
-            if candidate is not None:
-                candidate.unlink(missing_ok=True)
+        return write_managed_include(
+            self.paths.include,
+            self.paths.main_config,
+            content,
+            subprocess_run=subprocess_run,
+            atomic_replace_fn=atomic_replace_fn,
+            backup_count=backup_count,
+            sway_binary=sway_binary,
+        )
 
     def _conflicts(self, new_rule: Mapping[str, Any]) -> tuple[IncludeConflict, ...]:
         """Refuse competing external rule statements unless explicitly allowed."""
@@ -594,6 +593,236 @@ class ManagedRuleStore:
         removed = self.get(rule_id)
         self.write([entry for entry in self.list() if entry["rule_id"] != removed["rule_id"]], **write_kwargs)
         return removed
+
+
+_STARTUP_CONFIG_NAME = "hermes-sway-plugin-startup.conf"
+_STARTUP_MAIN_CONFIG_NAME = "config"
+_STARTUP_FORMAT = 1
+_STARTUP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+_STARTUP_RUN_ON = ("sway_start_only", "sway_start_and_every_reload")
+_STARTUP_RELAUNCH_WARNING = "config_rollback_cannot_terminate_launched_processes"
+
+
+@dataclass(frozen=True)
+class ManagedStartupPaths:
+    """Explicit configured locations used by the plugin-owned startup include."""
+
+    config_dir: Path
+    main_config: Path
+    include: Path
+
+
+def managed_startup_paths(config_dir: str | Path) -> ManagedStartupPaths:
+    """Resolve only a caller-supplied configuration directory; never a user default."""
+
+    if not isinstance(config_dir, (str, Path)) or not str(config_dir).strip():
+        raise ConfigFormatError("config_dir must be configured for persistent startup entries")
+    directory = Path(config_dir).expanduser()
+    if not directory.is_absolute():
+        raise ConfigFormatError("config_dir must be an absolute path")
+    return ManagedStartupPaths(
+        directory, directory / _STARTUP_MAIN_CONFIG_NAME, directory / _STARTUP_CONFIG_NAME
+    )
+
+
+def _startup_argv(argv: object) -> list[str]:
+    if isinstance(argv, (str, bytes)) or not isinstance(argv, (list, tuple)) or not 1 <= len(argv) <= 64:
+        raise RuleRenderError("argv must contain 1 to 64 strings")
+    if any(not isinstance(item, str) or not item or "\x00" in item or "\n" in item for item in argv):
+        raise RuleRenderError("every argv element must be a non-empty single-line string")
+    return list(argv)
+
+
+def render_startup_entry(entry: Mapping[str, Any]) -> str:
+    """Render one startup command as a shell-safe Sway ``exec`` statement.
+
+    ``exec`` runs when Sway starts.  ``exec_always`` also reruns the command on
+    every configuration reload, so it is only ever rendered for an explicitly
+    acknowledged entry.
+    """
+
+    if not isinstance(entry, Mapping):
+        raise RuleRenderError("startup entry must be an object")
+    argv = _startup_argv(entry.get("argv"))
+    run_on = entry.get("run_on")
+    if run_on not in _STARTUP_RUN_ON:
+        raise RuleRenderError("run_on must be sway_start_only or sway_start_and_every_reload")
+    keyword = "exec" if run_on == "sway_start_only" else "exec_always"
+    return keyword + " " + shlex.join(argv)
+
+
+def normalize_managed_startup(entry: Mapping[str, Any], *, allow_generated_id: bool = True) -> dict[str, Any]:
+    """Validate, render, and canonicalize one persisted startup entry."""
+
+    if not isinstance(entry, Mapping):
+        raise RuleRenderError("startup entry must be an object")
+    candidate = {
+        "argv": _startup_argv(entry.get("argv")),
+        "run_on": entry.get("run_on"),
+    }
+    if candidate["run_on"] not in _STARTUP_RUN_ON:
+        raise RuleRenderError("run_on must be sway_start_only or sway_start_and_every_reload")
+    render_startup_entry(candidate)
+    entry_id = entry.get("entry_id")
+    if entry_id is None:
+        if not allow_generated_id:
+            raise RuleRenderError("entry_id is required")
+        digest = hashlib.sha256(_canonical_metadata(candidate).encode("utf-8")).hexdigest()[:12]
+        entry_id = "startup_" + digest
+    elif not isinstance(entry_id, str) or not _STARTUP_ID.fullmatch(entry_id):
+        raise RuleRenderError("entry_id must use 1-64 letters, numbers, '.', '_', ':', or '-'")
+    return {"entry_id": entry_id, **candidate}
+
+
+def render_managed_startup(entries: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> str:
+    """Render sorted startup entries into the one deterministic managed document."""
+
+    normalized = [normalize_managed_startup(entry, allow_generated_id=False) for entry in entries]
+    if len({entry["entry_id"] for entry in normalized}) != len(normalized):
+        raise ConfigFormatError("managed startup metadata contains duplicate entry_id values")
+    ordered = sorted(normalized, key=lambda entry: entry["entry_id"])
+    body = "".join(render_startup_entry(entry) + "\n" for entry in ordered)
+    metadata = {"format": _STARTUP_FORMAT, "resource": "sway_startup", "entries": ordered}
+    return render_managed_config(body, metadata)
+
+
+class ManagedStartupStore:
+    """Stdlib-only managed resource facade for plugin-owned startup commands."""
+
+    def __init__(self, config_dir: str | Path) -> None:
+        self.paths = managed_startup_paths(config_dir)
+
+    def list(self) -> list[dict[str, Any]]:
+        include = self.paths.include
+        if not include.exists():
+            return []
+        try:
+            parsed = parse_managed_config(include.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ConfigFormatError(f"cannot read managed startup include: {exc}") from exc
+        metadata = parsed.metadata
+        if (
+            set(metadata) != {"format", "resource", "entries"}
+            or metadata.get("format") != _STARTUP_FORMAT
+            or metadata.get("resource") != "sway_startup"
+        ):
+            raise ConfigFormatError("managed startup include has unrecognized metadata")
+        entries = metadata.get("entries")
+        if not isinstance(entries, list):
+            raise ConfigFormatError("managed startup metadata must contain an entries list")
+        expected = parse_managed_config(render_managed_startup(entries))
+        if expected.body != parsed.body:
+            raise ManualEditRefused("manual edit refused: managed startup entries do not match metadata")
+        return [_copy_json(entry) for entry in expected.metadata["entries"]]
+
+    def get(self, entry_id: object) -> dict[str, Any]:
+        selected = _startup_entry_id(entry_id)
+        for entry in self.list():
+            if entry["entry_id"] == selected:
+                return entry
+        raise ConfigFormatError(f"managed startup entry not found: {selected}")
+
+    def write(
+        self,
+        entries: list[Mapping[str, Any]],
+        *,
+        subprocess_run: Any,
+        atomic_replace_fn: Callable[..., AtomicWrite] | None = None,
+        backup_count: int = 3,
+        sway_binary: str = "sway",
+    ) -> AtomicWrite:
+        return write_managed_include(
+            self.paths.include,
+            self.paths.main_config,
+            render_managed_startup(entries),
+            subprocess_run=subprocess_run,
+            atomic_replace_fn=atomic_replace_fn,
+            backup_count=backup_count,
+            sway_binary=sway_binary,
+        )
+
+    def add(self, entry: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
+        created = normalize_managed_startup(entry)
+        existing = self.list()
+        if any(item["entry_id"] == created["entry_id"] for item in existing):
+            raise ConfigFormatError(f"managed startup entry already exists: {created['entry_id']}")
+        duplicate = _duplicate_startup(existing, created)
+        if duplicate is not None:
+            raise DuplicateStartupEntry(
+                f"an entry already starts the same command with run_on {created['run_on']}: {duplicate['entry_id']}"
+            )
+        self.write(existing + [created], **write_kwargs)
+        return created
+
+    def update(self, entry_id: object, entry: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
+        selected = _startup_entry_id(entry_id)
+        updated = normalize_managed_startup({**dict(entry), "entry_id": selected}, allow_generated_id=False)
+        existing = self.list()
+        if not any(item["entry_id"] == selected for item in existing):
+            raise ConfigFormatError(f"managed startup entry not found: {selected}")
+        remaining = [item for item in existing if item["entry_id"] != selected]
+        duplicate = _duplicate_startup(remaining, updated)
+        if duplicate is not None:
+            raise DuplicateStartupEntry(
+                f"an entry already starts the same command with run_on {updated['run_on']}: {duplicate['entry_id']}"
+            )
+        self.write([updated, *remaining], **write_kwargs)
+        return updated
+
+    def remove(self, entry_id: object, **write_kwargs: Any) -> dict[str, Any]:
+        removed = self.get(entry_id)
+        self.write([item for item in self.list() if item["entry_id"] != removed["entry_id"]], **write_kwargs)
+        return removed
+
+
+def _startup_entry_id(value: object) -> str:
+    if not isinstance(value, str) or not _STARTUP_ID.fullmatch(value):
+        raise RuleRenderError("entry_id must use 1-64 letters, numbers, '.', '_', ':', or '-'")
+    return value
+
+
+def _duplicate_startup(
+    entries: list[Mapping[str, Any]], candidate: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    key = (candidate["run_on"], tuple(candidate["argv"]))
+    for entry in entries:
+        if (entry["run_on"], tuple(entry["argv"])) == key:
+            return entry
+    return None
+
+
+def write_managed_include(
+    include: Path,
+    main_config: Path,
+    content: str,
+    *,
+    subprocess_run: Any,
+    atomic_replace_fn: Callable[..., AtomicWrite] | None = None,
+    backup_count: int = 3,
+    sway_binary: str = "sway",
+) -> AtomicWrite:
+    """Validate a rendered include beside the main config, then replace it atomically."""
+
+    if isinstance(backup_count, bool) or not isinstance(backup_count, int) or backup_count < 0:
+        raise AtomicWriteError("backup_keep must be a non-negative integer")
+    if not Path(main_config).is_file():
+        raise ConfigValidationError(f"configuration does not exist: {main_config}")
+    include.parent.mkdir(parents=True, exist_ok=True)
+    candidate: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=include.parent, prefix=include.name + ".candidate.", delete=False
+        ) as handle:
+            candidate = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        validate_candidate_and_main(candidate, main_config, subprocess_run, sway_binary=sway_binary)
+        writer = atomic_replace if atomic_replace_fn is None else atomic_replace_fn
+        return writer(include, content, backup_count=backup_count)
+    finally:
+        if candidate is not None:
+            candidate.unlink(missing_ok=True)
 
 
 def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Path) -> tuple[IncludeConflict, ...]:

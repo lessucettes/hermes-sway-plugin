@@ -355,10 +355,10 @@ def _audit_live_rule_cardinality(
     }
 
 
-def _apply_rule_reload(
+def _apply_persistent_reload(
     args: Mapping[str, Any],
     settings: Mapping[str, Any],
-    paths: persistent.ManagedRulePaths,
+    paths: persistent.ManagedRulePaths | persistent.ManagedStartupPaths,
     *,
     ipc_factory: IPCFactory,
     reload_fn: Callable[..., persistent.ReloadResult],
@@ -448,7 +448,7 @@ def sway_rule(
     else:
         audit_data = None
         result = store.remove(_require(args, "rule_id"), **write_kwargs)
-    reload_warnings, reload_data = _apply_rule_reload(
+    reload_warnings, reload_data = _apply_persistent_reload(
         args,
         settings,
         store.paths,
@@ -466,6 +466,135 @@ def sway_rule(
         },
         ("applies_to_new_windows_only", *reload_warnings),
     )
+
+
+def sway_layout(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+    **kwargs: Any,
+) -> str:
+    """Run one verified, bounded layout mutation against the live Sway session."""
+    if not isinstance(args, Mapping):
+        raise SwayPluginError("invalid_argument", "arguments must be an object")
+    action = _require(args, "action")
+    target = _require(args, "target")
+    if not isinstance(action, str):
+        raise SwayPluginError("invalid_argument", "action must be a string")
+    if action == "swap" and args.get("other_target") in (None, ""):
+        raise SwayPluginError("invalid_argument", "swap requires other_target", {"argument": "other_target"})
+    timeout = settings.get("ipc_timeout_seconds", 3.0)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
+    arguments = {
+        key: value
+        for key, value in args.items()
+        if key not in {"action", "target"} and value is not None
+    }
+    result = RuntimeService(ipc_factory(timeout=float(timeout))).layout(action, target, **arguments)
+    return ok(RUNTIME, result, result.get("warnings", ()))
+
+
+def _startup_from_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the typed startup entry representation from model arguments."""
+
+    entry_id = args.get("entry_id", args.get("startup_id"))
+    run_on = args.get("run_on", "sway_start_only")
+    if run_on not in persistent._STARTUP_RUN_ON:
+        raise SwayPluginError("invalid_argument", "run_on must be sway_start_only or sway_start_and_every_reload")
+    if run_on == "sway_start_and_every_reload" and not _boolean(
+        args.get("acknowledge_reload_relaunch"), "acknowledge_reload_relaunch", False
+    ):
+        raise SwayPluginError(
+            "reload_relaunch_not_acknowledged",
+            "sway_start_and_every_reload relaunches the command on every reload; "
+            "pass acknowledge_reload_relaunch=true to confirm",
+        )
+    return {"entry_id": entry_id, "argv": _startup_argv_arg(args.get("argv")), "run_on": run_on}
+
+
+def _startup_argv_arg(argv: object) -> list[str]:
+    """Reject malformed argv as a model-facing argument error, not a rule error."""
+
+    if isinstance(argv, (str, bytes)) or not isinstance(argv, (list, tuple)) or not 1 <= len(argv) <= 64:
+        raise SwayPluginError("invalid_argument", "argv must contain 1 to 64 strings", {"argument": "argv"})
+    if any(not isinstance(item, str) or not item or "\x00" in item or "\n" in item for item in argv):
+        raise SwayPluginError(
+            "invalid_argument", "every argv element must be a non-empty single-line string", {"argument": "argv"}
+        )
+    return list(argv)
+
+
+def _startup_warnings(entry: Mapping[str, Any]) -> list[str]:
+    warnings = ["runs_on_sway_start_only"]
+    if entry.get("run_on") == "sway_start_and_every_reload":
+        warnings = [persistent._STARTUP_RELAUNCH_WARNING, "relaunches_on_every_sway_reload"]
+    return warnings
+
+
+def sway_startup(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    subprocess_run: Callable[..., Any] = subprocess.run,
+    atomic_replace_fn: Callable[..., persistent.AtomicWrite] | None = None,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+    reload_fn: Callable[..., persistent.ReloadResult] = persistent.reload_with_rollback,
+    **kwargs: Any,
+) -> str:
+    """Manage one deterministic, plugin-owned persistent startup document."""
+
+    if not isinstance(args, Mapping):
+        raise SwayPluginError("invalid_argument", "arguments must be an object")
+    action = _require(args, "action")
+    if action not in {"list", "get", "preview", "add", "update", "remove"}:
+        raise SwayPluginError("invalid_argument", "unsupported sway_startup action", {"action": action})
+    if action == "preview":
+        entry = persistent.normalize_managed_startup(_startup_from_args(args))
+        return ok(
+            PERSISTENT,
+            {"action": "preview", "entry": entry, "rendered": persistent.render_startup_entry(entry)},
+            _startup_warnings(entry),
+        )
+
+    store = persistent.ManagedStartupStore(settings.get("config_dir", ""))
+    if action == "list":
+        return ok(PERSISTENT, {"action": action, "entries": store.list(), "include": str(store.paths.include)})
+    if action == "get":
+        return ok(PERSISTENT, {"action": action, "entry": store.get(_entry_id_arg(args))})
+
+    backup_keep = settings.get("backup_keep", 10)
+    write_kwargs = {
+        "subprocess_run": subprocess_run,
+        "atomic_replace_fn": atomic_replace_fn,
+        "backup_count": backup_keep,
+    }
+    if action == "add":
+        result = store.add(_startup_from_args(args), **write_kwargs)
+    elif action == "update":
+        result = store.update(_entry_id_arg(args), _startup_from_args(args), **write_kwargs)
+    else:
+        result = store.remove(_entry_id_arg(args), **write_kwargs)
+    reload_warnings, reload_data = _apply_persistent_reload(
+        args,
+        settings,
+        store.paths,
+        ipc_factory=ipc_factory,
+        reload_fn=reload_fn,
+    )
+    return ok(
+        PERSISTENT,
+        {"action": action, "entry": result, "include": str(store.paths.include), **reload_data},
+        (*_startup_warnings(result), *reload_warnings),
+    )
+
+
+def _entry_id_arg(args: Mapping[str, Any]) -> Any:
+    entry_id = args.get("entry_id", args.get("startup_id"))
+    if entry_id in (None, ""):
+        raise SwayPluginError("invalid_argument", "missing required argument: entry_id", {"argument": "entry_id"})
+    return entry_id
 
 
 def _not_implemented(tool: str) -> Callable[..., str]:
@@ -488,6 +617,8 @@ def _translate_exception(exc: Exception) -> SwayPluginError:
         return SwayPluginError("ipc_protocol_error", str(exc))
     if isinstance(exc, persistent.CardinalityError):
         return SwayPluginError("cardinality_unverified", str(exc))
+    if isinstance(exc, persistent.DuplicateStartupEntry):
+        return SwayPluginError("duplicate_startup_entry", str(exc))
     if isinstance(exc, persistent.ManualEditRefused):
         return SwayPluginError("manual_edit_refused", str(exc))
     if isinstance(exc, persistent.ConfigValidationError):
@@ -526,7 +657,7 @@ def build_handlers(
         "sway_inspect": bind(sway_inspect),
         "sway_window": bind(sway_window),
         "sway_workspace": bind(sway_workspace),
-        "sway_layout": bind(_not_implemented("sway_layout")),
+        "sway_layout": bind(sway_layout),
         "sway_launch": bind(
             lambda args, settings, **kwargs: sway_launch(
                 args, settings, process_factory=process_factory, **kwargs
@@ -541,7 +672,15 @@ def build_handlers(
                 **kwargs,
             )
         ),
-        "sway_startup": bind(_not_implemented("sway_startup")),
+        "sway_startup": bind(
+            lambda args, settings, **kwargs: sway_startup(
+                args,
+                settings,
+                subprocess_run=subprocess_run,
+                atomic_replace_fn=atomic_replace_fn,
+                **kwargs,
+            )
+        ),
     }
 
 
