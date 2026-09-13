@@ -178,6 +178,57 @@ class RuntimeService:
         elif action == "unmark" and mark in current.marks:
             raise SwayPluginError("postcondition_failed", "mark was not removed", {"con_id": node.id, "mark": mark})
         return {"con_id": node.id, "action": action, "warnings": warnings}
+    def workspace(self, action: str, workspace: object, **arguments: Any) -> dict[str, Any]:
+        """Apply one workspace mutation and verify it from a fresh tree."""
+        if not isinstance(workspace, str) or not workspace:
+            raise SwayPluginError("invalid_argument", "workspace must be a non-empty string")
+        before = self._snapshot()
+        existing = {item.name: item for item in before.workspaces()}
+        warnings: list[str] = []
+        result_workspace = workspace
+        prior_focus = before.focused_workspace
+        output: str | None = None
+        restore_focus = False
+        if action == "focus_or_create":
+            command = f"workspace {commands.quote(workspace)}"
+            self._run(command)
+        elif action == "rename":
+            new_name = arguments.get("new_name")
+            if workspace not in existing:
+                raise SwayPluginError("target_not_found", "workspace does not currently exist", {"workspace": workspace})
+            if not isinstance(new_name, str) or not new_name:
+                raise SwayPluginError("invalid_argument", "new_name must be a non-empty string")
+            if new_name in existing:
+                raise SwayPluginError("precondition_failed", "a workspace already has the new name", {"workspace": new_name})
+            result_workspace = new_name
+            self._run(f"rename workspace {commands.quote(workspace)} to {commands.quote(new_name)}")
+        elif action == "move_to_output":
+            output = arguments.get("output")
+            restore_focus = arguments.get("restore_focus", True)
+            if workspace not in existing:
+                raise SwayPluginError("target_not_found", "workspace does not currently exist", {"workspace": workspace})
+            if not isinstance(output, str) or not output:
+                raise SwayPluginError("invalid_argument", "output must be a non-empty string")
+            if not isinstance(restore_focus, bool):
+                raise SwayPluginError("invalid_argument", "restore_focus must be a boolean")
+            self._run(f"workspace {commands.quote(workspace)}; move workspace to output {commands.quote(output)}")
+            if restore_focus and prior_focus is not None and prior_focus != workspace:
+                self._run(f"workspace {commands.quote(prior_focus)}")
+        else:
+            raise SwayPluginError("invalid_argument", "unsupported workspace action", {"action": action})
+
+        after = self._post_snapshot()
+        after_workspaces = {item.name: item for item in after.workspaces()}
+        current = after_workspaces.get(result_workspace)
+        if action == "focus_or_create" and after.focused_workspace != workspace:
+            raise SwayPluginError("postcondition_failed", "workspace did not become focused", {"workspace": workspace})
+        if action == "rename" and (current is None or workspace in after_workspaces):
+            raise SwayPluginError("postcondition_failed", "workspace was not renamed", {"workspace": workspace, "new_name": result_workspace})
+        if action == "move_to_output" and (current is None or current.output != output):
+            raise SwayPluginError("postcondition_failed", "workspace did not move to the requested output", {"workspace": workspace, "output": output})
+        if action == "move_to_output" and restore_focus and prior_focus is not None and prior_focus != workspace and after.focused_workspace != prior_focus:
+            raise SwayPluginError("postcondition_failed", "prior workspace focus was not restored", {"workspace": prior_focus})
+        return {"workspace": result_workspace, "action": action, "warnings": warnings}
 
 
 __all__ = ["RuntimeService"]

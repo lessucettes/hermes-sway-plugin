@@ -114,6 +114,22 @@ def updated_node_tree(raw_tree, con_id, **updates):
     return tree
 
 
+def focused_workspace_tree(raw_tree, workspace_id):
+    """Return a copied tree with exactly one workspace marked focused."""
+    import copy
+
+    tree = copy.deepcopy(raw_tree)
+
+    def visit(node):
+        if node.get("type") == "workspace":
+            node["focused"] = node.get("id") == workspace_id
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            visit(child)
+
+    visit(tree)
+    return tree
+
+
 def without_node_tree(raw_tree, con_id):
     """Return a copied tree with one node removed."""
     import copy
@@ -132,6 +148,37 @@ def without_node_tree(raw_tree, con_id):
         return False
 
     assert visit(tree)
+    return tree
+
+
+def moved_node_tree(raw_tree, con_id, parent_id):
+    """Return a copied tree with one node reparented into ``parent_id``."""
+    import copy
+
+    tree = copy.deepcopy(raw_tree)
+    moved = None
+
+    def detach(node):
+        nonlocal moved
+        for key in ("nodes", "floating_nodes"):
+            for child in list(node.get(key, [])):
+                if child.get("id") == con_id:
+                    node[key].remove(child)
+                    moved = child
+                    return True
+                if detach(child):
+                    return True
+        return False
+
+    def find(node):
+        if node.get("id") == parent_id:
+            return node
+        return next((found for child in node.get("nodes", []) + node.get("floating_nodes", []) if (found := find(child)) is not None), None)
+
+    assert detach(tree) and moved is not None
+    parent = find(tree)
+    assert parent is not None
+    parent.setdefault("nodes", []).append(moved)
     return tree
 
 HERMES_REPO = Path(
