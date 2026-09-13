@@ -47,7 +47,7 @@ def test_set_parent_layout_resolves_once_runs_a_typed_command_and_checks_the_fre
     assert client.requests == [ipc.GET_VERSION, ipc.GET_TREE, ipc.GET_TREE]
 
 
-@pytest.mark.parametrize("layout", [None, "grid", True])
+@pytest.mark.parametrize("layout", [None, "grid", True, []])
 def test_set_parent_layout_rejects_invalid_layout_without_a_command(layout):
     client = RuntimeClient([load_fixture("tree_mixed.json")])
 
@@ -94,7 +94,7 @@ def test_split_at_uses_only_horizontal_or_vertical_orientation_and_checks_a_fres
     assert client.requests == [ipc.GET_VERSION, ipc.GET_TREE, ipc.GET_TREE]
 
 
-@pytest.mark.parametrize("orientation", [None, "none", "diagonal", True])
+@pytest.mark.parametrize("orientation", [None, "none", "diagonal", True, []])
 def test_split_at_rejects_invalid_orientation_without_a_command(orientation):
     client = RuntimeClient([load_fixture("tree_mixed.json")])
 

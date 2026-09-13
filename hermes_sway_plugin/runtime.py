@@ -42,7 +42,7 @@ class RuntimeService:
 
         if action == "set_parent_layout":
             layout = arguments.get("layout")
-            if layout not in {"default", "splith", "splitv", "stacking", "tabbed"}:
+            if not isinstance(layout, str) or layout not in {"default", "splith", "splitv", "stacking", "tabbed"}:
                 raise SwayPluginError(
                     "invalid_argument",
                     "layout must be default, splith, splitv, stacking, or tabbed",
@@ -86,7 +86,7 @@ class RuntimeService:
 
         if action == "split_at":
             orientation = arguments.get("orientation")
-            if orientation not in {"horizontal", "vertical"}:
+            if not isinstance(orientation, str) or orientation not in {"horizontal", "vertical"}:
                 raise SwayPluginError("invalid_argument", "orientation must be horizontal or vertical")
             self._run(f"{commands.criterion_for_con_id(node.id)} split {orientation}")
             after = self._post_snapshot()
