@@ -64,7 +64,7 @@ def test_startup_preview_renders_exec_without_writing(tmp_path):
         bound["sway_startup"](
             {
                 "action": "preview",
-                "entry_id": "telegram",
+                "startup_id": "telegram",
                 "argv": ["telegram-desktop", "--start-intro"],
                 "run_on": "sway_start_only",
             }
@@ -74,7 +74,7 @@ def test_startup_preview_renders_exec_without_writing(tmp_path):
     assert result["ok"] is True
     assert result["scope"] == "persistent"
     assert result["data"]["rendered"] == "exec telegram-desktop --start-intro"
-    assert result["data"]["entry"]["entry_id"] == "telegram"
+    assert result["data"]["entry"]["startup_id"] == "telegram"
     assert "config_rollback_cannot_terminate_launched_processes" not in result["warnings"]
     assert not config_dir.exists()
 
@@ -88,7 +88,7 @@ def test_startup_exec_always_requires_explicit_reload_acknowledgement(tmp_path):
         bound["sway_startup"](
             {
                 "action": "preview",
-                "entry_id": "panel",
+                "startup_id": "panel",
                 "argv": ["waybar"],
                 "run_on": "sway_start_and_every_reload",
             }
@@ -98,7 +98,7 @@ def test_startup_exec_always_requires_explicit_reload_acknowledgement(tmp_path):
         bound["sway_startup"](
             {
                 "action": "preview",
-                "entry_id": "panel",
+                "startup_id": "panel",
                 "argv": ["waybar"],
                 "run_on": "sway_start_and_every_reload",
                 "acknowledge_reload_relaunch": True,
@@ -125,14 +125,14 @@ def test_startup_add_persists_shell_safe_command_and_list_reads_it_back(tmp_path
         bound["sway_startup"](
             {
                 "action": "add",
-                "entry_id": "quoted-app",
+                "startup_id": "quoted-app",
                 "argv": ["kitty", "--title", "it's here", "a b"],
                 "run_on": "sway_start_only",
             }
         )
     )
     listed = json.loads(bound["sway_startup"]({"action": "list"}))
-    fetched = json.loads(bound["sway_startup"]({"action": "get", "entry_id": "quoted-app"}))
+    fetched = json.loads(bound["sway_startup"]({"action": "get", "startup_id": "quoted-app"}))
 
     include = config_dir / "hermes-sway-plugin-startup.conf"
     text = include.read_text(encoding="utf-8")
@@ -141,6 +141,7 @@ def test_startup_add_persists_shell_safe_command_and_list_reads_it_back(tmp_path
     assert "exec kitty --title 'it'\"'\"'s here' 'a b'" in text
     assert listed["data"]["entries"] == [added["data"]["entry"]]
     assert fetched["data"]["entry"] == added["data"]["entry"]
+    assert fetched["data"]["entry"]["startup_id"] == "quoted-app"
     assert "include_not_configured" in added["warnings"]
     assert client.commands == []
     assert len(calls) == 2
@@ -154,7 +155,7 @@ def test_startup_add_rejects_a_duplicate_normalized_command(tmp_path):
     bound["sway_startup"](
         {
             "action": "add",
-            "entry_id": "first",
+                            "startup_id": "first",
             "argv": ["waybar"],
             "run_on": "sway_start_only",
         }
@@ -163,7 +164,7 @@ def test_startup_add_rejects_a_duplicate_normalized_command(tmp_path):
         bound["sway_startup"](
             {
                 "action": "add",
-                "entry_id": "second",
+                "startup_id": "second",
                 "argv": ["waybar"],
                 "run_on": "sway_start_only",
             }
@@ -172,9 +173,8 @@ def test_startup_add_rejects_a_duplicate_normalized_command(tmp_path):
 
     assert duplicate["ok"] is False
     assert duplicate["error"]["code"] == "duplicate_startup_entry"
-    assert [entry["entry_id"] for entry in json.loads(bound["sway_startup"]({"action": "list"}))["data"]["entries"]] == [
-        "first"
-    ]
+    listed = json.loads(bound["sway_startup"]({"action": "list"}))
+    assert [entry["startup_id"] for entry in listed["data"]["entries"]] == ["first"]
 
 
 def test_startup_update_and_remove_keep_the_managed_include_deterministic(tmp_path):
@@ -182,22 +182,22 @@ def test_startup_update_and_remove_keep_the_managed_include_deterministic(tmp_pa
     calls = []
     bound = handlers.build_handlers(_settings(config_dir), ipc_factory=_offline, subprocess_run=_runner(calls))
 
-    bound["sway_startup"]({"action": "add", "entry_id": "panel", "argv": ["waybar"], "run_on": "sway_start_only"})
+    bound["sway_startup"]({"action": "add", "startup_id": "panel", "argv": ["waybar"], "run_on": "sway_start_only"})
     updated = json.loads(
         bound["sway_startup"](
             {
                 "action": "update",
-                "entry_id": "panel",
+                "startup_id": "panel",
                 "argv": ["waybar", "--log-level", "warning"],
                 "run_on": "sway_start_only",
             }
         )
     )
-    removed = json.loads(bound["sway_startup"]({"action": "remove", "entry_id": "panel"}))
+    removed = json.loads(bound["sway_startup"]({"action": "remove", "startup_id": "panel"}))
     listed = json.loads(bound["sway_startup"]({"action": "list"}))
 
     assert updated["data"]["entry"]["argv"] == ["waybar", "--log-level", "warning"]
-    assert removed["data"]["entry"]["entry_id"] == "panel"
+    assert removed["data"]["entry"]["startup_id"] == "panel"
     assert listed["data"]["entries"] == []
     assert "exec_always" not in (config_dir / "hermes-sway-plugin-startup.conf").read_text(encoding="utf-8")
 
@@ -207,7 +207,7 @@ def test_startup_write_refuses_an_empty_argv_array(tmp_path):
     bound = handlers.build_handlers(_settings(config_dir))
 
     result = json.loads(
-        bound["sway_startup"]({"action": "preview", "entry_id": "broken", "argv": [], "run_on": "sway_start_only"})
+        bound["sway_startup"]({"action": "preview", "startup_id": "broken", "argv": [], "run_on": "sway_start_only"})
     )
 
     assert result["ok"] is False

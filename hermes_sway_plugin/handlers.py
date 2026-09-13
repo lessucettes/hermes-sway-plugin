@@ -461,6 +461,7 @@ def sway_rule(
             "action": action,
             "rule": result,
             "include": str(store.paths.include),
+            "applies_to_new_windows_only": True,
             **reload_data,
             **({"cardinality_audit": audit_data} if audit_data is not None else {}),
         },
@@ -499,7 +500,7 @@ def sway_layout(
 def _startup_from_args(args: Mapping[str, Any]) -> dict[str, Any]:
     """Build the typed startup entry representation from model arguments."""
 
-    entry_id = args.get("entry_id", args.get("startup_id"))
+    entry_id = args.get("startup_id", args.get("entry_id"))
     run_on = args.get("run_on", "sway_start_only")
     if run_on not in persistent._STARTUP_RUN_ON:
         raise SwayPluginError("invalid_argument", "run_on must be sway_start_only or sway_start_and_every_reload")
@@ -524,6 +525,12 @@ def _startup_argv_arg(argv: object) -> list[str]:
             "invalid_argument", "every argv element must be a non-empty single-line string", {"argument": "argv"}
         )
     return list(argv)
+
+
+def _startup_result(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Present a stored entry under the schema-declared ``startup_id`` name."""
+
+    return {"startup_id": entry["entry_id"], "argv": entry["argv"], "run_on": entry["run_on"]}
 
 
 def _startup_warnings(entry: Mapping[str, Any]) -> list[str]:
@@ -554,15 +561,22 @@ def sway_startup(
         entry = persistent.normalize_managed_startup(_startup_from_args(args))
         return ok(
             PERSISTENT,
-            {"action": "preview", "entry": entry, "rendered": persistent.render_startup_entry(entry)},
+            {"action": "preview", "entry": _startup_result(entry), "rendered": persistent.render_startup_entry(entry)},
             _startup_warnings(entry),
         )
 
     store = persistent.ManagedStartupStore(settings.get("config_dir", ""))
     if action == "list":
-        return ok(PERSISTENT, {"action": action, "entries": store.list(), "include": str(store.paths.include)})
+        return ok(
+            PERSISTENT,
+            {
+                "action": action,
+                "entries": [_startup_result(entry) for entry in store.list()],
+                "include": str(store.paths.include),
+            },
+        )
     if action == "get":
-        return ok(PERSISTENT, {"action": action, "entry": store.get(_entry_id_arg(args))})
+        return ok(PERSISTENT, {"action": action, "entry": _startup_result(store.get(_entry_id_arg(args)))})
 
     backup_keep = settings.get("backup_keep", 10)
     write_kwargs = {
@@ -585,15 +599,15 @@ def sway_startup(
     )
     return ok(
         PERSISTENT,
-        {"action": action, "entry": result, "include": str(store.paths.include), **reload_data},
+        {"action": action, "entry": _startup_result(result), "include": str(store.paths.include), **reload_data},
         (*_startup_warnings(result), *reload_warnings),
     )
 
 
 def _entry_id_arg(args: Mapping[str, Any]) -> Any:
-    entry_id = args.get("entry_id", args.get("startup_id"))
+    entry_id = args.get("startup_id", args.get("entry_id"))
     if entry_id in (None, ""):
-        raise SwayPluginError("invalid_argument", "missing required argument: entry_id", {"argument": "entry_id"})
+        raise SwayPluginError("invalid_argument", "missing required argument: startup_id", {"argument": "startup_id"})
     return entry_id
 
 

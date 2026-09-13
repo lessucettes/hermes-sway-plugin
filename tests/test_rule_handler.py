@@ -87,6 +87,7 @@ def test_rule_add_persists_and_list_reads_a_deterministic_managed_include(tmp_pa
 
     assert added["ok"] is True
     assert added["data"]["rule"]["rule_id"] == "app-to-dev"
+    assert added["data"]["applies_to_new_windows_only"] is True
     assert added["warnings"] == ["applies_to_new_windows_only"]
     assert listed["data"]["rules"] == [added["data"]["rule"]]
     assert 'for_window [app_id="^org\\\\.example\\\\.App$"] move container to workspace "dev"\n' in include.read_text(encoding="utf-8")
