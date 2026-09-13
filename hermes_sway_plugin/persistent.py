@@ -292,8 +292,10 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
         raise RuleRenderError(str(exc)) from exc
     destination = rule.get("destination", {})
     effects = rule.get("effects", {})
-    if not isinstance(destination, Mapping) or set(destination) - {"workspace"}:
-        raise RuleRenderError("window destination can contain only workspace")
+    if not isinstance(destination, Mapping) or set(destination) - {"workspace", "output"}:
+        raise RuleRenderError("window destination can contain only workspace or output")
+    if len(destination) > 1:
+        raise RuleRenderError("window destination must choose workspace or output, not both")
     if not isinstance(effects, Mapping):
         raise RuleRenderError("window effects must be an object")
     supported_effects = {
@@ -305,6 +307,8 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
     commands: list[str] = []
     if "workspace" in destination:
         commands.append("move container to workspace " + _rule_quote(destination["workspace"], "destination workspace"))
+    if "output" in destination:
+        commands.append("move container to output " + _rule_quote(destination["output"], "destination output"))
     for name, command in (("floating", "floating"), ("fullscreen", "fullscreen"), ("sticky", "sticky")):
         if name in effects:
             commands.append(command + (" enable" if _rule_bool(effects[name], name) else " disable"))
