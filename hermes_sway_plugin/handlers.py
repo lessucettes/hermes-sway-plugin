@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from .errors import READ_ONLY, SwayPluginError, error, ok
+from .errors import READ_ONLY, RUNTIME, SwayPluginError, error, ok
 from . import ipc, tree
+from .runtime import RuntimeService
 
 ConfigGetter = Callable[..., Any]
 IPCFactory = Callable[..., Any]
@@ -174,6 +175,52 @@ def sway_inspect(
     return ok(READ_ONLY, _inspect_data(client, view, criteria, max_results, include_geometry))
 
 
+def sway_window(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+    **kwargs: Any,
+) -> str:
+    """Run one verified, typed window mutation against the live Sway session."""
+    if not isinstance(args, Mapping):
+        raise SwayPluginError("invalid_argument", "arguments must be an object")
+    target = _require(args, "target")
+    action = _require(args, "action")
+    if not isinstance(action, str):
+        raise SwayPluginError("invalid_argument", "action must be a string")
+    timeout = settings.get("ipc_timeout_seconds", 3.0)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
+    result = RuntimeService(ipc_factory(timeout=float(timeout))).window(
+        target, action, **{key: value for key, value in args.items() if key not in {"target", "action"}}
+    )
+    return ok(RUNTIME, result, result.get("warnings", ()))
+
+
+def sway_workspace(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+    **kwargs: Any,
+) -> str:
+    """Run one verified, typed workspace mutation against the live Sway session."""
+    if not isinstance(args, Mapping):
+        raise SwayPluginError("invalid_argument", "arguments must be an object")
+    action = _require(args, "action")
+    workspace = _require(args, "workspace")
+    if not isinstance(action, str):
+        raise SwayPluginError("invalid_argument", "action must be a string")
+    timeout = settings.get("ipc_timeout_seconds", 3.0)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
+    result = RuntimeService(ipc_factory(timeout=float(timeout))).workspace(
+        action, workspace, **{key: value for key, value in args.items() if key not in {"action", "workspace"}}
+    )
+    return ok(RUNTIME, result, result.get("warnings", ()))
+
+
 def _not_implemented(tool: str) -> Callable[..., str]:
     def handler(args: Mapping[str, Any], settings: Mapping[str, Any], **kwargs: Any) -> str:
         raise SwayPluginError("internal_error", f"{tool} is not implemented yet", {}, recoverable=False)
@@ -214,8 +261,8 @@ def build_handlers(
 
     return {
         "sway_inspect": bind(sway_inspect),
-        "sway_window": bind(_not_implemented("sway_window")),
-        "sway_workspace": bind(_not_implemented("sway_workspace")),
+        "sway_window": bind(sway_window),
+        "sway_workspace": bind(sway_workspace),
         "sway_layout": bind(_not_implemented("sway_layout")),
         "sway_launch": bind(_not_implemented("sway_launch")),
         "sway_rule": bind(_not_implemented("sway_rule")),
