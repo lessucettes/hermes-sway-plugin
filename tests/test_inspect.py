@@ -47,8 +47,45 @@ def test_inspect_summary_reports_version_focus_and_compact_counts(tmp_path):
         ipc.GET_VERSION,
         ipc.GET_TREE,
         ipc.GET_OUTPUTS,
+        ipc.GET_WORKSPACES,
         ipc.GET_MARKS,
     }
+
+
+def test_inspect_uses_live_workspace_state_when_the_tree_omits_the_flags(tmp_path):
+    """Sway 1.9 omits ``visible``/``focused`` on workspace nodes in GET_TREE.
+
+    These assertions use recorded Sway 1.9 output, where the tree node carries no
+    flag at all, so the workspace record and the focused workspace must come from
+    GET_WORKSPACES instead of reporting a misleading ``false``/``null``.
+    """
+    fake = FakeSway(
+        str(tmp_path / "sway-ipc.sock"),
+        replies={
+            ipc.GET_VERSION: version_payload(),
+            ipc.GET_TREE: load_fixture("recorded_tree.json"),
+            ipc.GET_OUTPUTS: load_fixture("recorded_outputs.json"),
+            ipc.GET_WORKSPACES: load_fixture("recorded_workspaces.json"),
+            ipc.GET_MARKS: load_fixture("recorded_marks.json"),
+        },
+    )
+    bound = handlers.build_handlers(
+        lambda _key, default=None: default,
+        ipc_factory=lambda **kwargs: ipc.SwayIPC(socket_path=fake.socket_path, **kwargs),
+    )["sway_inspect"]
+    try:
+        workspaces = json.loads(bound({"view": "workspaces"}))["data"]
+        summary = json.loads(bound({"view": "summary"}))["data"]
+    finally:
+        fake.close()
+
+    records = {record["name"]: record for record in workspaces["items"]}
+    assert records["1"]["visible"] is False
+    assert records["1"]["focused"] is False
+    assert records["2"]["visible"] is True
+    assert records["2"]["focused"] is True
+    assert summary["focused"]["workspace"] == "2"
+    assert summary["focused"]["output"] == "DP-1"
 
 
 def test_inspect_windows_filters_wayland_xwayland_and_substrings(tmp_path):

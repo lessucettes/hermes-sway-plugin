@@ -111,8 +111,10 @@ def _inspect_data(
     version = ipc.assert_sway_19(client.request(ipc.GET_VERSION))
     snapshot = tree.build_snapshot(client.request(ipc.GET_TREE))
     outputs = tree.parse_outputs(client.request(ipc.GET_OUTPUTS))
+    states = tree.parse_workspace_states(client.request(ipc.GET_WORKSPACES))
     workspace_records = snapshot.workspaces(
-        include_scratchpad=bool(criteria.get("include_scratchpad", False))
+        include_scratchpad=bool(criteria.get("include_scratchpad", False)),
+        states=states,
     )
     marks = tree.parse_marks(client.request(ipc.GET_MARKS))
     windows = [
@@ -123,12 +125,22 @@ def _inspect_data(
         if _matches_window(window, criteria)
     ]
     focused = snapshot.focused_window()
+    # GET_WORKSPACES is authoritative for live focus when the tree omits it.
+    focused_workspace = next((state.name for state in states.values() if state.focused), None)
+    if focused_workspace is None:
+        focused_workspace = snapshot.focused_workspace
+    focused_output = snapshot.focused_output
+    if focused_output is None and focused_workspace is not None:
+        focused_output = next(
+            (record.output for record in workspace_records if record.name == focused_workspace and record.output),
+            None,
+        )
     common = {
         "version": _compact_version(version),
         "focused": {
             "window": focused.compact(include_geometry=include_geometry) if focused else None,
-            "workspace": snapshot.focused_workspace,
-            "output": snapshot.focused_output,
+            "workspace": focused_workspace,
+            "output": focused_output,
         },
     }
 

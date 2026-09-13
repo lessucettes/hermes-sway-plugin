@@ -139,6 +139,50 @@ class WindowSummary:
 
 
 @dataclass(frozen=True)
+class WorkspaceState:
+    """Live workspace flags from ``GET_WORKSPACES``.
+
+    Sway 1.9 does not include ``visible``/``focused`` on workspace nodes in
+    ``GET_TREE``, so these fields are the authoritative source for those flags.
+    """
+
+    name: str
+    visible: bool
+    focused: bool
+    urgent: bool
+    output: Optional[str] = None
+    num: Optional[int] = None
+    layout: Optional[str] = None
+    rect: Optional[Rect] = None
+
+
+def parse_workspace_states(reply: object) -> dict[str, WorkspaceState]:
+    """Parse a ``GET_WORKSPACES`` reply into per-name live workspace state."""
+
+    if not isinstance(reply, list):
+        raise TreeFormatError("GET_WORKSPACES reply is not a list")
+    states: dict[str, WorkspaceState] = {}
+    for entry in reply:
+        if not isinstance(entry, dict):
+            raise TreeFormatError("GET_WORKSPACES entry is not an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise TreeFormatError("GET_WORKSPACES entry has no usable name")
+        raw_num = entry.get("num")
+        states[name] = WorkspaceState(
+            name=name,
+            visible=bool(entry.get("visible")),
+            focused=bool(entry.get("focused")),
+            urgent=bool(entry.get("urgent")),
+            output=entry.get("output") if isinstance(entry.get("output"), str) else None,
+            num=raw_num if isinstance(raw_num, int) and not isinstance(raw_num, bool) else None,
+            layout=entry.get("layout") if isinstance(entry.get("layout"), str) else None,
+            rect=_rect(entry.get("rect")),
+        )
+    return states
+
+
+@dataclass(frozen=True)
 class WorkspaceSummary:
     name: str
     num: Optional[int]
@@ -227,7 +271,18 @@ class Snapshot:
         collected.sort(key=lambda window: window.con_id)
         return tuple(collected)
 
-    def workspaces(self, include_scratchpad: bool = False) -> tuple[WorkspaceSummary, ...]:
+    def workspaces(
+        self,
+        include_scratchpad: bool = False,
+        states: Optional[Mapping[str, WorkspaceState]] = None,
+    ) -> tuple[WorkspaceSummary, ...]:
+        """Return workspace records, preferring live ``GET_WORKSPACES`` flags.
+
+        ``GET_TREE`` omits ``visible``/``focused`` on workspace nodes in Sway 1.9,
+        so any supplied live state overrides those flags instead of reporting a
+        misleading ``false``.
+        """
+
         collected = []
         for node in self.nodes.values():
             if node.type != "workspace" or node.name is None:
@@ -239,16 +294,17 @@ class Snapshot:
                 for candidate in self.nodes.values()
                 if candidate.is_window and candidate.workspace == node.name
             )
+            state = (states or {}).get(node.name)
             collected.append(
                 WorkspaceSummary(
                     name=node.name,
-                    num=node.workspace_number,
-                    output=node.output,
-                    visible=node.visible,
-                    focused=node.focused,
-                    urgent=node.urgent,
+                    num=node.workspace_number if node.workspace_number is not None else (state.num if state else None),
+                    output=node.output if node.output is not None else (state.output if state else None),
+                    visible=state.visible if state else node.visible,
+                    focused=state.focused if state else node.focused,
+                    urgent=state.urgent if state else node.urgent,
                     layout=node.layout,
-                    rect=node.rect,
+                    rect=node.rect if node.rect is not None else (state.rect if state else None),
                     window_count=window_count,
                 )
             )
