@@ -290,7 +290,11 @@ def correlate_launch(
                 return _correlation_result(
                     launched, last_candidates, identity, ancestor_pids, timed_out=True
                 )
-            if not isinstance(event, Mapping) or event.get("change") != "new":
+            if (
+                _event_type != ipc.EVENT_WINDOW
+                or not isinstance(event, Mapping)
+                or event.get("change") != "new"
+            ):
                 continue
 
             current = tree.build_snapshot(client.request(ipc.GET_TREE))
