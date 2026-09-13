@@ -28,6 +28,78 @@ class RuntimeService:
     def _current_window(self, snapshot: tree.Snapshot, con_id: int) -> tree.WindowSummary | None:
         return next((window for window in snapshot.windows(include_scratchpad=True) if window.con_id == con_id), None)
 
+    def layout(self, action: str, target: object, **arguments: Any) -> dict[str, Any]:
+        """Apply one bounded layout mutation and verify fresh tree evidence.
+
+        Sway is permitted to introduce or flatten intermediate containers while
+        executing these commands, so verification tracks the selected live
+        containers and their observable relationship rather than assuming an
+        unchanged complete ancestry chain.
+        """
+        before = self._snapshot()
+        node = resolve_target(before, target, window_only=False)
+        warnings = ["Sway may automatically split or flatten containers, changing ancestry; inspect the resulting layout"]
+
+        if action == "set_parent_layout":
+            layout = arguments.get("layout")
+            if layout not in {"default", "splith", "splitv", "stacking", "tabbed"}:
+                raise SwayPluginError(
+                    "invalid_argument",
+                    "layout must be default, splith, splitv, stacking, or tabbed",
+                )
+            parent = before.node(node.parent_id) if node.parent_id is not None else None
+            if parent is None:
+                raise SwayPluginError(
+                    "precondition_failed",
+                    "set_parent_layout requires a target with a live parent container",
+                    {"con_id": node.id},
+                )
+            self._run(f"{commands.criterion_for_con_id(parent.id)} layout {layout}")
+            after = self._post_snapshot()
+            current = after.node(node.id)
+            if current is None:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "target disappeared while verifying the layout mutation",
+                    {"con_id": node.id, "action": action},
+                )
+            current_parent = after.node(current.parent_id) if current.parent_id is not None else None
+            if current_parent is None:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "target no longer has a live parent after setting its parent layout",
+                    {"con_id": node.id, "action": action},
+                )
+            if layout != "default" and current_parent.layout != layout:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "target parent did not reach the requested layout",
+                    {"con_id": node.id, "layout": layout, "observed_layout": current_parent.layout},
+                )
+            return {
+                "action": action,
+                "con_id": node.id,
+                "parent_con_id": parent.id,
+                "layout": layout,
+                "warnings": warnings,
+            }
+
+        if action == "split_at":
+            orientation = arguments.get("orientation")
+            if orientation not in {"horizontal", "vertical"}:
+                raise SwayPluginError("invalid_argument", "orientation must be horizontal or vertical")
+            self._run(f"{commands.criterion_for_con_id(node.id)} split {orientation}")
+            after = self._post_snapshot()
+            if after.node(node.id) is None:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "target disappeared while verifying the split",
+                    {"con_id": node.id, "action": action},
+                )
+            return {"action": action, "con_id": node.id, "orientation": orientation, "warnings": warnings}
+
+        raise SwayPluginError("invalid_argument", "unsupported layout action", {"action": action})
+
     def window(self, target: object, action: str, **arguments: Any) -> dict[str, Any]:
         """Apply one window mutation and assert its observable postcondition."""
         before = self._snapshot()
