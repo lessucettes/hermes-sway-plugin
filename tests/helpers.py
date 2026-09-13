@@ -97,6 +97,22 @@ def moved_window_tree(raw_tree, con_id, workspace_id):
     workspace.setdefault("nodes", []).append(moved)
     return tree
 
+
+def updated_node_tree(raw_tree, con_id, **updates):
+    """Return a copied tree with fields changed on one identified node."""
+    import copy
+
+    tree = copy.deepcopy(raw_tree)
+
+    def visit(node):
+        if node.get("id") == con_id:
+            node.update(updates)
+            return True
+        return any(visit(child) for child in node.get("nodes", []) + node.get("floating_nodes", []))
+
+    assert visit(tree)
+    return tree
+
 HERMES_REPO = Path(
     os.environ.get("HERMES_REPO", str(Path.home() / ".hermes" / "hermes-agent"))
 ).expanduser()

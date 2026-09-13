@@ -36,6 +36,10 @@ class RuntimeService:
         warnings: list[str] = []
         workspace: str | None = None
         output: str | None = None
+        enabled: bool | None = None
+        width: int | None = None
+        height: int | None = None
+        position: Mapping[str, Any] | None = None
         if action == "focus":
             command = f"{criterion} focus"
         elif action == "move_to_workspace":
@@ -54,6 +58,35 @@ class RuntimeService:
                 raise SwayPluginError("invalid_argument", "direction must be left, right, up, or down")
             command = f"{criterion} move {direction}"
             warnings.append("directional placement is compositor-dependent; inspect the resulting layout")
+        elif action in {"set_floating", "set_fullscreen"}:
+            enabled = arguments.get("enabled")
+            if not isinstance(enabled, bool):
+                raise SwayPluginError("invalid_argument", "enabled must be a boolean")
+            operation = "floating" if action == "set_floating" else "fullscreen"
+            command = f"{criterion} {operation} {'enable' if enabled else 'disable'}"
+        elif action == "resize":
+            current_before = self._current_window(before, node.id)
+            if current_before is None or not current_before.floating or current_before.fullscreen:
+                raise SwayPluginError("precondition_failed", "resize requires a floating, non-fullscreen window")
+            width, height = arguments.get("width"), arguments.get("height")
+            unit = arguments.get("unit", "px")
+            if not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in (width, height)):
+                raise SwayPluginError("invalid_argument", "width and height must be positive integers")
+            if unit not in {"px", "ppt"}:
+                raise SwayPluginError("invalid_argument", "unit must be px or ppt")
+            command = f"{criterion} resize set {width} {unit} {height} {unit}"
+        elif action == "position":
+            current_before = self._current_window(before, node.id)
+            if current_before is None or not current_before.floating or current_before.fullscreen:
+                raise SwayPluginError("precondition_failed", "position requires a floating, non-fullscreen window")
+            candidate = arguments.get("position")
+            if not isinstance(candidate, Mapping) or candidate.get("mode") != "coordinates":
+                raise SwayPluginError("invalid_argument", "position must specify coordinate mode")
+            x, y = candidate.get("x"), candidate.get("y")
+            if not all(isinstance(value, int) and not isinstance(value, bool) for value in (x, y)):
+                raise SwayPluginError("invalid_argument", "position coordinates must be integers")
+            position = candidate
+            command = f"{criterion} move position {x} px {y} px"
         else:
             raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
 
@@ -86,6 +119,26 @@ class RuntimeService:
                 "window did not move to the requested output",
                 {"con_id": node.id, "output": output},
             )
+        elif action == "set_floating" and current.floating != enabled:
+            raise SwayPluginError("postcondition_failed", "window floating state did not change", {"con_id": node.id})
+        elif action == "set_fullscreen" and current.fullscreen != enabled:
+            raise SwayPluginError("postcondition_failed", "window fullscreen state did not change", {"con_id": node.id})
+        elif action == "resize" and (
+            current.rect is None or current.rect.width != width or current.rect.height != height
+        ):
+            raise SwayPluginError("postcondition_failed", "window size did not reach the requested dimensions", {"con_id": node.id})
+        elif action == "position":
+            assert position is not None
+            if (
+                current.rect is None
+                or current.rect.x != position["x"]
+                or current.rect.y != position["y"]
+            ):
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "window position did not reach the requested coordinates",
+                    {"con_id": node.id},
+                )
         return {"con_id": node.id, "action": action, "warnings": warnings}
 
 
