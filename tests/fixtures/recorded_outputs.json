@@ -1,0 +1,311 @@
+[
+  {
+    "id": 3,
+    "type": "output",
+    "orientation": "none",
+    "percent": 1.0,
+    "urgent": false,
+    "marks": [],
+    "layout": "output",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 2560,
+      "height": 1440
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "DP-1",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      95,
+      93
+    ],
+    "fullscreen_mode": 0,
+    "sticky": false,
+    "primary": false,
+    "make": "LG Electronics",
+    "model": "27GL850",
+    "serial": "003NTKFFB797",
+    "modes": [
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 99946,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 60000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 59940,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 50000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 30000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 29970,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 25000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 24000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 3840,
+        "height": 2160,
+        "refresh": 23976,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 143999,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 119998,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 59951,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 120000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 119880,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 74986,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 60000,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 60000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 59940,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 50000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1680,
+        "height": 1050,
+        "refresh": 59883,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1600,
+        "height": 900,
+        "refresh": 60000,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1280,
+        "height": 1024,
+        "refresh": 75025,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1280,
+        "height": 1024,
+        "refresh": 60020,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1280,
+        "height": 800,
+        "refresh": 59910,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1152,
+        "height": 864,
+        "refresh": 59967,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1280,
+        "height": 720,
+        "refresh": 60000,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1280,
+        "height": 720,
+        "refresh": 60000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1280,
+        "height": 720,
+        "refresh": 59940,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1280,
+        "height": 720,
+        "refresh": 50000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "refresh": 75029,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "refresh": 60004,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 800,
+        "height": 600,
+        "refresh": 75000,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 800,
+        "height": 600,
+        "refresh": 60317,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 720,
+        "height": 576,
+        "refresh": 50000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 720,
+        "height": 480,
+        "refresh": 60000,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 720,
+        "height": 480,
+        "refresh": 59940,
+        "picture_aspect_ratio": "16:9"
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "refresh": 75000,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "refresh": 60000,
+        "picture_aspect_ratio": "4:3"
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "refresh": 59940,
+        "picture_aspect_ratio": "none"
+      },
+      {
+        "width": 640,
+        "height": 480,
+        "refresh": 59940,
+        "picture_aspect_ratio": "4:3"
+      }
+    ],
+    "non_desktop": false,
+    "active": true,
+    "dpms": true,
+    "power": true,
+    "scale": 1.0,
+    "scale_filter": "nearest",
+    "transform": "normal",
+    "adaptive_sync_status": "disabled",
+    "current_workspace": "2",
+    "current_mode": {
+      "width": 2560,
+      "height": 1440,
+      "refresh": 99946,
+      "picture_aspect_ratio": "none"
+    },
+    "max_render_time": 0,
+    "focused": true,
+    "subpixel_hinting": "rgb"
+  }
+]

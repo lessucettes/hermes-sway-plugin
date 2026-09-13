@@ -8,6 +8,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def load_fixture(name: str):
+    """Load a recorded or synthetic JSON fixture by file name."""
+    import json
+
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 HERMES_REPO = Path(
     os.environ.get("HERMES_REPO", str(Path.home() / ".hermes" / "hermes-agent"))

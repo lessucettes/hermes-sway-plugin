@@ -1,0 +1,47 @@
+[
+  {
+    "name": "1",
+    "num": 1,
+    "output": "DP-1",
+    "visible": true,
+    "focused": true,
+    "urgent": false,
+    "layout": "splitv",
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  {
+    "name": "2",
+    "num": 2,
+    "output": "DP-1",
+    "visible": true,
+    "focused": false,
+    "urgent": false,
+    "layout": "tabbed",
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  {
+    "name": "3",
+    "num": 3,
+    "output": "DP-2",
+    "visible": false,
+    "focused": false,
+    "urgent": false,
+    "layout": "splith",
+    "rect": {
+      "x": 1920,
+      "y": 0,
+      "width": 1920,
+      "height": 1200
+    }
+  }
+]
