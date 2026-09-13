@@ -2,9 +2,9 @@ name: sway
 version: 0.1.0
 description: Safe Sway 1.9 inspection, runtime control, and persistent configuration tools
 kind: standalone
-author: Hermes Sway Plugin Contributors
+author: lessucettes
 license: MIT
-homepage: https://github.com/OWNER/hermes-sway-plugin
+homepage: https://github.com/lessucettes/hermes-sway-plugin
 tags:
   - sway
   - wayland

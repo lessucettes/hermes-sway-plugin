@@ -5,13 +5,30 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-sway-plugin"
 version = "0.1.0"
-description = "Native Hermes plugin for Sway 1.9"
+description = "Native Hermes Agent plugin for safe Sway 1.9 inspection, runtime control, and persistent configuration"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{name = "Hermes Sway Plugin Contributors"}]
+authors = [{ name = "lessucettes" }]
+keywords = ["hermes", "hermes-agent", "sway", "wayland", "linux", "desktop", "i3"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment :: Window Managers",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/lessucettes/hermes-sway-plugin"
+Repository = "https://github.com/lessucettes/hermes-sway-plugin"
+Issues = "https://github.com/lessucettes/hermes-sway-plugin/issues"
 
 [tool.setuptools.packages.find]
 include = ["hermes_sway_plugin*"]
