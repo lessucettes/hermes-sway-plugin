@@ -113,6 +113,27 @@ def updated_node_tree(raw_tree, con_id, **updates):
     assert visit(tree)
     return tree
 
+
+def without_node_tree(raw_tree, con_id):
+    """Return a copied tree with one node removed."""
+    import copy
+
+    tree = copy.deepcopy(raw_tree)
+
+    def visit(node):
+        for key in ("nodes", "floating_nodes"):
+            children = node.get(key, [])
+            for child in list(children):
+                if child.get("id") == con_id:
+                    children.remove(child)
+                    return True
+                if visit(child):
+                    return True
+        return False
+
+    assert visit(tree)
+    return tree
+
 HERMES_REPO = Path(
     os.environ.get("HERMES_REPO", str(Path.home() / ".hermes" / "hermes-agent"))
 ).expanduser()

@@ -40,6 +40,7 @@ class RuntimeService:
         width: int | None = None
         height: int | None = None
         position: Mapping[str, Any] | None = None
+        mark: str | None = None
         if action == "focus":
             command = f"{criterion} focus"
         elif action == "move_to_workspace":
@@ -87,12 +88,39 @@ class RuntimeService:
                 raise SwayPluginError("invalid_argument", "position coordinates must be integers")
             position = candidate
             command = f"{criterion} move position {x} px {y} px"
+        elif action == "move_to_scratchpad":
+            command = f"{criterion} move scratchpad"
+        elif action == "show_from_scratchpad":
+            current_before = self._current_window(before, node.id)
+            if current_before is None or not current_before.scratchpad:
+                raise SwayPluginError("precondition_failed", "window is not currently in the scratchpad")
+            command = f"{criterion} scratchpad show"
+        elif action == "set_sticky":
+            current_before = self._current_window(before, node.id)
+            enabled = arguments.get("enabled")
+            if current_before is None or not current_before.floating:
+                raise SwayPluginError("precondition_failed", "sticky requires a floating window")
+            if not isinstance(enabled, bool):
+                raise SwayPluginError("invalid_argument", "enabled must be a boolean")
+            command = f"{criterion} sticky {'enable' if enabled else 'disable'}"
+        elif action in {"mark", "unmark"}:
+            mark = commands.mark_name(arguments.get("mark"))
+            operation = "mark --add" if action == "mark" else "unmark"
+            command = f"{criterion} {operation} {commands.quote(mark)}"
+        elif action == "close":
+            if arguments.get("confirm_close") is not True:
+                raise SwayPluginError("precondition_failed", "close requires confirm_close=true")
+            command = f"{criterion} kill"
         else:
             raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
 
         self._run(command)
         after = self._post_snapshot()
         current = self._current_window(after, node.id)
+        if action == "close":
+            if current is not None:
+                raise SwayPluginError("postcondition_failed", "window remained after close", {"con_id": node.id})
+            return {"con_id": node.id, "action": action, "warnings": warnings}
         if current is None:
             raise SwayPluginError(
                 "postcondition_failed",
@@ -139,6 +167,16 @@ class RuntimeService:
                     "window position did not reach the requested coordinates",
                     {"con_id": node.id},
                 )
+        elif action == "move_to_scratchpad" and not current.scratchpad:
+            raise SwayPluginError("postcondition_failed", "window did not enter the scratchpad", {"con_id": node.id})
+        elif action == "show_from_scratchpad" and current.scratchpad:
+            raise SwayPluginError("postcondition_failed", "window remained in the scratchpad", {"con_id": node.id})
+        elif action == "set_sticky" and current.sticky != enabled:
+            raise SwayPluginError("postcondition_failed", "window sticky state did not change", {"con_id": node.id})
+        elif action == "mark" and mark not in current.marks:
+            raise SwayPluginError("postcondition_failed", "mark was not applied", {"con_id": node.id, "mark": mark})
+        elif action == "unmark" and mark in current.marks:
+            raise SwayPluginError("postcondition_failed", "mark was not removed", {"con_id": node.id, "mark": mark})
         return {"con_id": node.id, "action": action, "warnings": warnings}
 
 
