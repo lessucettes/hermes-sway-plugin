@@ -611,13 +611,6 @@ def _entry_id_arg(args: Mapping[str, Any]) -> Any:
     return entry_id
 
 
-def _not_implemented(tool: str) -> Callable[..., str]:
-    def handler(args: Mapping[str, Any], settings: Mapping[str, Any], **kwargs: Any) -> str:
-        raise SwayPluginError("internal_error", f"{tool} is not implemented yet", {}, recoverable=False)
-
-    return handler
-
-
 def _translate_exception(exc: Exception) -> SwayPluginError:
     if isinstance(exc, SwayPluginError):
         return exc
