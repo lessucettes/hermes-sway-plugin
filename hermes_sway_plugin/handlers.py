@@ -289,6 +289,7 @@ def _rule_from_args(args: Mapping[str, Any]) -> dict[str, Any]:
             "match": _require(args, "match"),
             "destination": args.get("destination", {}),
             "effects": args.get("effects", {}),
+            "intended_cardinality": intended,
         }
     return {
         "kind": kind,
@@ -297,20 +298,48 @@ def _rule_from_args(args: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def sway_rule(args: Mapping[str, Any], settings: Mapping[str, Any], **kwargs: Any) -> str:
-    """Preview persistent rule syntax without changing filesystem or Sway state."""
+def sway_rule(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    subprocess_run: Callable[..., Any] = subprocess.run,
+    atomic_replace_fn: Callable[..., persistent.AtomicWrite] | None = None,
+    **kwargs: Any,
+) -> str:
+    """Manage one deterministic, plugin-owned persistent rule document."""
 
     if not isinstance(args, Mapping):
         raise SwayPluginError("invalid_argument", "arguments must be an object")
     action = _require(args, "action")
-    if action != "preview":
-        raise SwayPluginError("invalid_argument", "sway_rule action is not implemented", {"action": action})
-    rule = _rule_from_args(args)
-    return ok(
-        PERSISTENT,
-        {"action": "preview", "rule": rule, "rendered": persistent.render_rule(rule)},
-        ("applies_to_new_windows_only",),
-    )
+    if action not in {"list", "get", "preview", "add", "update", "remove"}:
+        raise SwayPluginError("invalid_argument", "unsupported sway_rule action", {"action": action})
+    if action == "preview":
+        rule = persistent.normalize_managed_rule(_rule_from_args(args))
+        return ok(
+            PERSISTENT,
+            {"action": "preview", "rule": rule, "rendered": persistent.render_rule(rule)},
+            ("applies_to_new_windows_only",),
+        )
+
+    store = persistent.ManagedRuleStore(settings.get("config_dir", ""))
+    if action == "list":
+        return ok(PERSISTENT, {"action": action, "rules": store.list(), "include": str(store.paths.include)})
+    if action == "get":
+        return ok(PERSISTENT, {"action": action, "rule": store.get(_require(args, "rule_id"))})
+
+    backup_keep = settings.get("backup_keep", 10)
+    write_kwargs = {
+        "subprocess_run": subprocess_run,
+        "atomic_replace_fn": atomic_replace_fn,
+        "backup_count": backup_keep,
+    }
+    if action == "add":
+        result = store.add({**_rule_from_args(args), "rule_id": args.get("rule_id")}, **write_kwargs)
+    elif action == "update":
+        result = store.update(_require(args, "rule_id"), _rule_from_args(args), **write_kwargs)
+    else:
+        result = store.remove(_require(args, "rule_id"), **write_kwargs)
+    return ok(PERSISTENT, {"action": action, "rule": result, "include": str(store.paths.include)}, ("applies_to_new_windows_only",))
 
 
 def _not_implemented(tool: str) -> Callable[..., str]:
@@ -341,6 +370,8 @@ def build_handlers(
     *,
     ipc_factory: IPCFactory = ipc.SwayIPC,
     process_factory: launch.ProcessFactory = subprocess.Popen,
+    subprocess_run: Callable[..., Any] = subprocess.run,
+    atomic_replace_fn: Callable[..., persistent.AtomicWrite] | None = None,
 ) -> dict[str, Callable[..., str]]:
     """Bind every tool handler to configuration and optional test dependencies."""
 
@@ -364,7 +395,15 @@ def build_handlers(
                 args, settings, process_factory=process_factory, **kwargs
             )
         ),
-        "sway_rule": bind(sway_rule),
+        "sway_rule": bind(
+            lambda args, settings, **kwargs: sway_rule(
+                args,
+                settings,
+                subprocess_run=subprocess_run,
+                atomic_replace_fn=atomic_replace_fn,
+                **kwargs,
+            )
+        ),
         "sway_startup": bind(_not_implemented("sway_startup")),
     }
 

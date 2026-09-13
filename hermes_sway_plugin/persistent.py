@@ -16,7 +16,7 @@ import re
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _MANAGED_MARKER = "# hermes-sway-plugin: managed-v1"
 _METADATA_PREFIX = "# hermes-sway-plugin: metadata="
@@ -403,6 +403,186 @@ def audit_cardinality(
         expectation = "one" if intended == "one" else "one or more"
         raise CardinalityError(f"expected {expectation} matching current window(s), found {count}")
     return audit
+
+
+
+_RULE_CONFIG_NAME = "hermes-sway-plugin-rules.conf"
+_RULE_MAIN_CONFIG_NAME = "config"
+_RULE_FORMAT = 1
+_RULE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+
+
+@dataclass(frozen=True)
+class ManagedRulePaths:
+    """Explicit configured locations used by the plugin-owned rule include."""
+
+    config_dir: Path
+    main_config: Path
+    include: Path
+
+
+def managed_rule_paths(config_dir: str | Path) -> ManagedRulePaths:
+    """Resolve only a caller-supplied configuration directory; never a user default."""
+
+    if not isinstance(config_dir, (str, Path)) or not str(config_dir).strip():
+        raise ConfigFormatError("config_dir must be configured for persistent rules")
+    directory = Path(config_dir).expanduser()
+    if not directory.is_absolute():
+        raise ConfigFormatError("config_dir must be an absolute path")
+    return ManagedRulePaths(directory, directory / _RULE_MAIN_CONFIG_NAME, directory / _RULE_CONFIG_NAME)
+
+
+def _copy_json(value: Any) -> Any:
+    """Copy only JSON-safe resource values and expose deterministic representations."""
+
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    except (TypeError, ValueError) as exc:
+        raise RuleRenderError("rule must contain JSON-compatible values") from exc
+
+
+def _rule_id(value: object, *, rule: Mapping[str, Any] | None = None) -> str:
+    if value is None:
+        if rule is None:
+            raise RuleRenderError("rule_id is required")
+        digest = hashlib.sha256(_canonical_metadata(rule).encode("utf-8")).hexdigest()[:16]
+        return "rule-" + digest
+    if not isinstance(value, str) or not _RULE_ID.fullmatch(value):
+        raise RuleRenderError("rule_id must use 1-64 letters, numbers, '.', '_', ':', or '-'")
+    return value
+
+
+def normalize_managed_rule(rule: Mapping[str, Any], *, allow_generated_id: bool = True) -> dict[str, Any]:
+    """Validate, render, and canonicalize one persisted resource entry."""
+
+    if not isinstance(rule, Mapping):
+        raise RuleRenderError("rule entry must be an object")
+    kind = rule.get("kind")
+    if kind == "window":
+        intended = rule.get("intended_cardinality")
+        if intended not in {"one", "many"}:
+            raise RuleRenderError("window rule requires intended_cardinality one or many")
+        candidate = {
+            "kind": "window",
+            "match": _copy_json(rule.get("match")),
+            "destination": _copy_json(rule.get("destination", {})),
+            "effects": _copy_json(rule.get("effects", {})),
+            "intended_cardinality": intended,
+        }
+    elif kind == "workspace_output":
+        candidate = {
+            "kind": "workspace_output",
+            "workspace": _copy_json(rule.get("workspace")),
+            "outputs": _copy_json(rule.get("outputs")),
+        }
+    else:
+        raise RuleRenderError("rule kind must be window or workspace_output")
+    # Rendering is also the complete grammar and bounded-effects validation.
+    render_rule(candidate)
+    rule_id = _rule_id(rule.get("rule_id"), rule=candidate if allow_generated_id else None)
+    return {"rule_id": rule_id, **candidate}
+
+
+def render_managed_rules(rules: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> str:
+    """Render sorted resource entries into the one deterministic managed document."""
+
+    normalized = [normalize_managed_rule(rule, allow_generated_id=False) for rule in rules]
+    if len({rule["rule_id"] for rule in normalized}) != len(normalized):
+        raise ConfigFormatError("managed rule metadata contains duplicate rule_id values")
+    ordered = sorted(normalized, key=lambda rule: rule["rule_id"])
+    body = "".join(render_rule({key: value for key, value in rule.items() if key not in {"rule_id", "intended_cardinality"}}) + "\n" for rule in ordered)
+    metadata = {"format": _RULE_FORMAT, "resource": "sway_rule", "rules": ordered}
+    return render_managed_config(body, metadata)
+
+
+class ManagedRuleStore:
+    """Stdlib-only managed resource facade for plugin-owned Sway rules."""
+
+    def __init__(self, config_dir: str | Path) -> None:
+        self.paths = managed_rule_paths(config_dir)
+
+    def list(self) -> list[dict[str, Any]]:
+        include = self.paths.include
+        if not include.exists():
+            return []
+        try:
+            parsed = parse_managed_config(include.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ConfigFormatError(f"cannot read managed rule include: {exc}") from exc
+        metadata = parsed.metadata
+        if set(metadata) != {"format", "resource", "rules"} or metadata.get("format") != _RULE_FORMAT or metadata.get("resource") != "sway_rule":
+            raise ConfigFormatError("managed rule include has unrecognized metadata")
+        rules = metadata.get("rules")
+        if not isinstance(rules, list):
+            raise ConfigFormatError("managed rule metadata must contain a rules list")
+        rendered = render_managed_rules(rules)
+        expected = parse_managed_config(rendered)
+        if expected.body != parsed.body:
+            raise ManualEditRefused("manual edit refused: managed rules do not match metadata")
+        return [_copy_json(rule) for rule in expected.metadata["rules"]]
+
+    def get(self, rule_id: object) -> dict[str, Any]:
+        selected = _rule_id(rule_id)
+        for rule in self.list():
+            if rule["rule_id"] == selected:
+                return rule
+        raise ConfigFormatError(f"managed rule not found: {selected}")
+
+    def preview(self, rules: list[Mapping[str, Any]]) -> str:
+        return render_managed_rules(rules)
+
+    def write(
+        self,
+        rules: list[Mapping[str, Any]],
+        *,
+        subprocess_run: Callable[..., Any],
+        atomic_replace_fn: Callable[..., AtomicWrite] | None = None,
+        backup_count: int = 3,
+        sway_binary: str = "sway",
+    ) -> AtomicWrite:
+        if isinstance(backup_count, bool) or not isinstance(backup_count, int) or backup_count < 0:
+            raise AtomicWriteError("backup_keep must be a non-negative integer")
+        if not self.paths.main_config.is_file():
+            raise ConfigValidationError(f"configuration does not exist: {self.paths.main_config}")
+        content = render_managed_rules(rules)
+        self.paths.config_dir.mkdir(parents=True, exist_ok=True)
+        candidate: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=self.paths.config_dir, prefix=_RULE_CONFIG_NAME + ".candidate.", delete=False
+            ) as handle:
+                candidate = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            validate_candidate_and_main(candidate, self.paths.main_config, subprocess_run, sway_binary=sway_binary)
+            writer = atomic_replace if atomic_replace_fn is None else atomic_replace_fn
+            return writer(self.paths.include, content, backup_count=backup_count)
+        finally:
+            if candidate is not None:
+                candidate.unlink(missing_ok=True)
+
+    def add(self, rule: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
+        created = normalize_managed_rule(rule)
+        existing = self.list()
+        if any(entry["rule_id"] == created["rule_id"] for entry in existing):
+            raise ConfigFormatError(f"managed rule already exists: {created['rule_id']}")
+        self.write(existing + [created], **write_kwargs)
+        return created
+
+    def update(self, rule_id: object, rule: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
+        selected = _rule_id(rule_id)
+        updated = normalize_managed_rule({**dict(rule), "rule_id": selected}, allow_generated_id=False)
+        existing = self.list()
+        if not any(entry["rule_id"] == selected for entry in existing):
+            raise ConfigFormatError(f"managed rule not found: {selected}")
+        self.write([updated if entry["rule_id"] == selected else entry for entry in existing], **write_kwargs)
+        return updated
+
+    def remove(self, rule_id: object, **write_kwargs: Any) -> dict[str, Any]:
+        removed = self.get(rule_id)
+        self.write([entry for entry in self.list() if entry["rule_id"] != removed["rule_id"]], **write_kwargs)
+        return removed
 
 
 def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Path) -> tuple[IncludeConflict, ...]:
