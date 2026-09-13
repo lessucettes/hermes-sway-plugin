@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any, Callable, Mapping
 
 from .errors import READ_ONLY, RUNTIME, SwayPluginError, error, ok
-from . import ipc, tree
+from . import ipc, launch, tree
 from .runtime import RuntimeService
 
 ConfigGetter = Callable[..., Any]
@@ -49,6 +50,18 @@ def _boolean(value: object, name: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise SwayPluginError("invalid_argument", f"{name} must be a boolean", {"argument": name})
     return value
+
+
+def _bounded_number(value: object, name: str, default: float, minimum: float, maximum: float) -> float:
+    if value is None:
+        return default
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not minimum <= value <= maximum:
+        raise SwayPluginError(
+            "invalid_argument",
+            f"{name} must be a number from {minimum} to {maximum}",
+            {"argument": name},
+        )
+    return float(value)
 
 
 def _compact_version(version: Mapping[str, Any]) -> dict[str, Any]:
@@ -221,6 +234,46 @@ def sway_workspace(
     return ok(RUNTIME, result, result.get("warnings", ()))
 
 
+def sway_launch(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+    process_factory: launch.ProcessFactory = subprocess.Popen,
+    **kwargs: Any,
+) -> str:
+    """Launch one argv process and report only best-effort window evidence."""
+    if not isinstance(args, Mapping):
+        raise SwayPluginError("invalid_argument", "arguments must be an object")
+    argv = _require(args, "argv")
+    wait_for_window = _boolean(args.get("wait_for_window"), "wait_for_window", True)
+    if not wait_for_window:
+        launched = launch.launch_process(argv, args.get("cwd"), process_factory)
+        return ok(
+            RUNTIME,
+            {**launched, "correlation": {"status": "not_requested"}},
+            ("window correlation was not requested",),
+        )
+    timeout = _bounded_number(
+        args.get("timeout_seconds"), "timeout_seconds", float(settings.get("launch_timeout_seconds", 10.0)), 0.5, 30.0
+    )
+    ipc_timeout = settings.get("ipc_timeout_seconds", 3.0)
+    if not isinstance(ipc_timeout, (int, float)) or isinstance(ipc_timeout, bool) or ipc_timeout <= 0:
+        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
+    client = ipc_factory(timeout=float(ipc_timeout))
+    ipc.assert_sway_19(client.request(ipc.GET_VERSION))
+    correlation = launch.launch_and_correlate(
+        client,
+        argv,
+        args.get("cwd"),
+        expected_identity=args.get("expected_identity"),
+        timeout_seconds=timeout,
+        process_factory=process_factory,
+    )
+    launched = {key: correlation[key] for key in ("pid", "started")}
+    return ok(RUNTIME, {**launched, "correlation": correlation})
+
+
 def _not_implemented(tool: str) -> Callable[..., str]:
     def handler(args: Mapping[str, Any], settings: Mapping[str, Any], **kwargs: Any) -> str:
         raise SwayPluginError("internal_error", f"{tool} is not implemented yet", {}, recoverable=False)
@@ -246,6 +299,7 @@ def build_handlers(
     get_config: ConfigGetter,
     *,
     ipc_factory: IPCFactory = ipc.SwayIPC,
+    process_factory: launch.ProcessFactory = subprocess.Popen,
 ) -> dict[str, Callable[..., str]]:
     """Bind every tool handler to configuration and optional test dependencies."""
 
@@ -264,7 +318,11 @@ def build_handlers(
         "sway_window": bind(sway_window),
         "sway_workspace": bind(sway_workspace),
         "sway_layout": bind(_not_implemented("sway_layout")),
-        "sway_launch": bind(_not_implemented("sway_launch")),
+        "sway_launch": bind(
+            lambda args, settings, **kwargs: sway_launch(
+                args, settings, process_factory=process_factory, **kwargs
+            )
+        ),
         "sway_rule": bind(_not_implemented("sway_rule")),
         "sway_startup": bind(_not_implemented("sway_startup")),
     }
