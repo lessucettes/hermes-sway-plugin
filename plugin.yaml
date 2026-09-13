@@ -1,0 +1,40 @@
+name: sway
+version: 0.1.0
+description: Safe Sway 1.9 inspection, runtime control, and persistent configuration tools
+kind: standalone
+author: Hermes Sway Plugin Contributors
+license: MIT
+homepage: https://github.com/OWNER/hermes-sway-plugin
+tags:
+  - sway
+  - wayland
+  - linux
+provides_tools:
+  - sway_inspect
+  - sway_window
+  - sway_workspace
+  - sway_layout
+  - sway_launch
+  - sway_rule
+  - sway_startup
+config_schema:
+  ipc_timeout_seconds:
+    type: float
+    default: 3.0
+    description: Timeout in seconds for Sway IPC requests.
+  reload_timeout_seconds:
+    type: float
+    default: 5.0
+    description: Timeout in seconds for Sway reload completion.
+  launch_timeout_seconds:
+    type: float
+    default: 10.0
+    description: Timeout in seconds for launch window correlation.
+  config_dir:
+    type: str
+    default: ""
+    description: Managed Sway configuration directory; empty uses the XDG default.
+  backup_keep:
+    type: int
+    default: 10
+    description: Number of plugin-created managed configuration backups to retain.
