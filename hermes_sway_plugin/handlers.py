@@ -497,7 +497,8 @@ def _translate_exception(exc: Exception) -> SwayPluginError:
     if isinstance(exc, persistent.ReloadRollbackError):
         return SwayPluginError("reload_failed", str(exc), recoverable=False)
     if isinstance(exc, persistent.PersistentConfigError):
-        return SwayPluginError("invalid_rule", str(exc))
+        code = "rule_not_found" if "not found" in str(exc) else "invalid_rule"
+        return SwayPluginError(code, str(exc))
     return SwayPluginError("internal_error", f"{type(exc).__name__}: {exc}", recoverable=False)
 
 
