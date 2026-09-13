@@ -10,7 +10,7 @@ from hermes_sway_plugin import ipc
 from hermes_sway_plugin.errors import SwayPluginError
 from hermes_sway_plugin.runtime import RuntimeService
 
-from .helpers import RuntimeClient, load_fixture, without_node_tree
+from .helpers import RuntimeClient, load_fixture, moved_node_tree, without_node_tree
 
 
 WARNING = "Sway may automatically split or flatten containers, changing ancestry; inspect the resulting layout"
@@ -45,6 +45,56 @@ def test_set_parent_layout_resolves_once_runs_a_typed_command_and_checks_the_fre
     }
     assert client.commands == ["[con_id=121] layout stacking"]
     assert client.requests == [ipc.GET_VERSION, ipc.GET_TREE, ipc.GET_TREE]
+
+
+def _workspace_parent_tree(raw_tree, con_id):
+    """Return a tree where ``con_id`` is a direct child of its workspace."""
+    tree = copy.deepcopy(raw_tree)
+    workspace_id = None
+
+    def find_workspace(node):
+        nonlocal workspace_id
+        if node.get("type") == "workspace":
+            workspace_id = node.get("id")
+            return True
+        return any(find_workspace(child) for child in node.get("nodes", []) + node.get("floating_nodes", []))
+
+    assert find_workspace(tree)
+    return moved_node_tree(raw_tree, con_id, workspace_id)
+
+
+def test_set_parent_layout_addresses_the_target_when_its_parent_is_a_workspace():
+    """Sway 1.9 rejects ``[con_id=<workspace>] layout``.
+
+    Verified against a live Sway 1.9 session: targeting the workspace id raises a
+    command rejection, while targeting the window makes Sway wrap it and its
+    siblings into the requested layout.
+    """
+    before = _workspace_parent_tree(load_fixture("tree_mixed.json"), 103)
+    after = copy.deepcopy(before)
+    wrapper = {"id": 130, "type": "con", "layout": "tabbed", "nodes": [], "floating_nodes": []}
+
+    def wrap(node):
+        children = node.get("nodes", [])
+        for index, child in enumerate(children):
+            if child.get("id") == 103:
+                children[index] = wrapper
+                wrapper["nodes"].append(child)
+                return True
+            if wrap(child):
+                return True
+        for child in node.get("floating_nodes", []):
+            if wrap(child):
+                return True
+        return False
+
+    assert wrap(after)
+    client = RuntimeClient([before, after])
+
+    result = RuntimeService(client).layout("set_parent_layout", {"con_id": 103}, layout="tabbed")
+
+    assert result["layout"] == "tabbed"
+    assert client.commands == ["[con_id=103] layout tabbed"]
 
 
 @pytest.mark.parametrize("layout", [None, "grid", True, []])

@@ -86,7 +86,15 @@ class RuntimeService:
                     "set_parent_layout requires a target with a live parent container",
                     {"con_id": node.id},
                 )
-            self._run(f"{commands.criterion_for_con_id(parent.id)} layout {layout}")
+            # Sway's con_id criterion does not address workspace containers: targeting
+            # the workspace id is rejected, so a window whose parent is a workspace is
+            # addressed directly and Sway wraps its siblings into the new layout.
+            criterion = (
+                commands.criterion_for_con_id(node.id)
+                if parent.type == "workspace"
+                else commands.criterion_for_con_id(parent.id)
+            )
+            self._run(f"{criterion} layout {layout}")
             after = self._post_snapshot()
             current = after.node(node.id)
             if current is None:
@@ -102,12 +110,20 @@ class RuntimeService:
                     "target no longer has a live parent after setting its parent layout",
                     {"con_id": node.id, "action": action},
                 )
-            if layout != "default" and current_parent.layout != layout:
-                raise SwayPluginError(
-                    "postcondition_failed",
-                    "target parent did not reach the requested layout",
-                    {"con_id": node.id, "layout": layout, "observed_layout": current_parent.layout},
-                )
+            if layout != "default":
+                # Sway may satisfy the request by wrapping the target (and its
+                # siblings) in a new container, or by setting the layout on the
+                # workspace itself, so accept either observed level.
+                workspace = after.node(current_parent.parent_id) if current_parent.parent_id is not None else None
+                observed = {current_parent.layout, current.layout}
+                if workspace is not None:
+                    observed.add(workspace.layout)
+                if layout not in observed:
+                    raise SwayPluginError(
+                        "postcondition_failed",
+                        "target parent did not reach the requested layout",
+                        {"con_id": node.id, "layout": layout, "observed_layout": current_parent.layout},
+                    )
             return {
                 "action": action,
                 "con_id": node.id,
