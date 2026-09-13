@@ -40,3 +40,17 @@ def test_move_to_output_uses_exact_name_and_verifies_the_destination():
 
     assert result == {"con_id": 101, "action": "move_to_output", "warnings": []}
     assert client.commands == ['[con_id=101] move container to output "DP-2"']
+
+
+def test_directional_move_returns_an_explicit_non_determinism_warning():
+    before = load_fixture("tree_mixed.json")
+    client = RuntimeClient([before, before])
+
+    result = RuntimeService(client).window({"con_id": 103}, "move_direction", direction="left")
+
+    assert result == {
+        "con_id": 103,
+        "action": "move_direction",
+        "warnings": ["directional placement is compositor-dependent; inspect the resulting layout"],
+    }
+    assert client.commands == ["[con_id=103] move left"]

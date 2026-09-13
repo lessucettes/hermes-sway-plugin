@@ -48,12 +48,24 @@ class RuntimeService:
             if not isinstance(output, str) or not output:
                 raise SwayPluginError("invalid_argument", "output must be a non-empty string")
             command = f"{criterion} move container to output {commands.quote(output)}"
+        elif action == "move_direction":
+            direction = arguments.get("direction")
+            if direction not in {"left", "right", "up", "down"}:
+                raise SwayPluginError("invalid_argument", "direction must be left, right, up, or down")
+            command = f"{criterion} move {direction}"
+            warnings.append("directional placement is compositor-dependent; inspect the resulting layout")
         else:
             raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
 
         self._run(command)
         after = self._post_snapshot()
         current = self._current_window(after, node.id)
+        if current is None:
+            raise SwayPluginError(
+                "postcondition_failed",
+                "window disappeared while verifying the mutation",
+                {"con_id": node.id, "action": action},
+            )
         if action == "focus":
             observed = after.focused_window()
             if observed is None or observed.con_id != node.id:
