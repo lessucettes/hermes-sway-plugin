@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from _hermes import ROOT, ensure_hermes_repo_on_path
+from .helpers import ROOT, ensure_hermes_repo_on_path
 
 
 EXPECTED_TOOLS = {
