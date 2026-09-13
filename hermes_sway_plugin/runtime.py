@@ -25,23 +25,44 @@ class RuntimeService:
     def _run(self, command: str) -> None:
         commands.command_or_raise(command, self._client.command(command))
 
+    def _current_window(self, snapshot: tree.Snapshot, con_id: int) -> tree.WindowSummary | None:
+        return next((window for window in snapshot.windows(include_scratchpad=True) if window.con_id == con_id), None)
+
     def window(self, target: object, action: str, **arguments: Any) -> dict[str, Any]:
         """Apply one window mutation and assert its observable postcondition."""
-        if action != "focus":
-            raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
         before = self._snapshot()
         node = resolve_target(before, target, window_only=True)
-        command = f"{commands.criterion_for_con_id(node.id)} focus"
+        criterion = commands.criterion_for_con_id(node.id)
+        warnings: list[str] = []
+        workspace: str | None = None
+        if action == "focus":
+            command = f"{criterion} focus"
+        elif action == "move_to_workspace":
+            workspace = arguments.get("workspace")
+            if not isinstance(workspace, str) or not workspace:
+                raise SwayPluginError("invalid_argument", "workspace must be a non-empty string")
+            command = f"{criterion} move container to workspace {commands.quote(workspace)}"
+        else:
+            raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
+
         self._run(command)
         after = self._post_snapshot()
-        current = after.focused_window()
-        if current is None or current.con_id != node.id:
+        current = self._current_window(after, node.id)
+        if action == "focus":
+            observed = after.focused_window()
+            if observed is None or observed.con_id != node.id:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "window did not become focused after the command",
+                    {"con_id": node.id, "action": action},
+                )
+        elif current is None or current.workspace != workspace:
             raise SwayPluginError(
                 "postcondition_failed",
-                "window did not become focused after the command",
-                {"con_id": node.id, "action": action},
+                "window did not move to the requested workspace",
+                {"con_id": node.id, "workspace": workspace},
             )
-        return {"con_id": node.id, "action": action, "warnings": []}
+        return {"con_id": node.id, "action": action, "warnings": warnings}
 
 
 __all__ = ["RuntimeService"]

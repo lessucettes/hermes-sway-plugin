@@ -61,6 +61,42 @@ def focused_tree(raw_tree, con_id):
     visit(tree)
     return tree
 
+
+def moved_window_tree(raw_tree, con_id, workspace_id):
+    """Return a tree with a view reparented directly into one workspace."""
+    import copy
+
+    tree = copy.deepcopy(raw_tree)
+    moved = None
+
+    def detach(node):
+        nonlocal moved
+        for key in ("nodes", "floating_nodes"):
+            children = node.get(key, [])
+            for child in list(children):
+                if child.get("id") == con_id:
+                    children.remove(child)
+                    moved = child
+                    return True
+                if detach(child):
+                    return True
+        return False
+
+    def find(node):
+        if node.get("id") == workspace_id:
+            return node
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            found = find(child)
+            if found is not None:
+                return found
+        return None
+
+    assert detach(tree) and moved is not None
+    workspace = find(tree)
+    assert workspace is not None
+    workspace.setdefault("nodes", []).append(moved)
+    return tree
+
 HERMES_REPO = Path(
     os.environ.get("HERMES_REPO", str(Path.home() / ".hermes" / "hermes-agent"))
 ).expanduser()
