@@ -94,6 +94,16 @@ def test_split_at_uses_only_horizontal_or_vertical_orientation_and_checks_a_fres
     assert client.requests == [ipc.GET_VERSION, ipc.GET_TREE, ipc.GET_TREE]
 
 
+def test_split_at_requires_the_target_to_survive_post_verification():
+    before = load_fixture("tree_mixed.json")
+    client = RuntimeClient([before, without_node_tree(before, 103)])
+
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).layout("split_at", {"con_id": 103}, orientation="horizontal")
+
+    assert excinfo.value.code == "postcondition_failed"
+
+
 @pytest.mark.parametrize("orientation", [None, "none", "diagonal", True, []])
 def test_split_at_rejects_invalid_orientation_without_a_command(orientation):
     client = RuntimeClient([load_fixture("tree_mixed.json")])
