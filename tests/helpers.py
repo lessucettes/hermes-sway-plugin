@@ -17,6 +17,50 @@ def load_fixture(name: str):
 
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
+
+class RuntimeClient:
+    """Injected request/command double with one fresh tree per observation."""
+
+    def __init__(self, trees, *, version=None, command_replies=None):
+        self._trees = list(trees)
+        self._version = version or {"major": 1, "minor": 9, "human_readable": "1.9"}
+        self._command_replies = list(command_replies or [[{"success": True}]])
+        self.requests = []
+        self.commands = []
+
+    def request(self, message_type, payload=""):
+        from hermes_sway_plugin import ipc
+
+        self.requests.append(message_type)
+        if message_type == ipc.GET_VERSION:
+            return self._version
+        if message_type == ipc.GET_TREE:
+            if not self._trees:
+                raise AssertionError("unexpected GET_TREE")
+            return self._trees.pop(0)
+        raise AssertionError(f"unexpected IPC request {message_type}")
+
+    def command(self, command):
+        self.commands.append(command)
+        if not self._command_replies:
+            raise AssertionError("unexpected Sway command")
+        return self._command_replies.pop(0)
+
+
+def focused_tree(raw_tree, con_id):
+    """Return a copied tree with exactly ``con_id`` focused."""
+    import copy
+
+    tree = copy.deepcopy(raw_tree)
+
+    def visit(node):
+        node["focused"] = node.get("id") == con_id
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            visit(child)
+
+    visit(tree)
+    return tree
+
 HERMES_REPO = Path(
     os.environ.get("HERMES_REPO", str(Path.home() / ".hermes" / "hermes-agent"))
 ).expanduser()
