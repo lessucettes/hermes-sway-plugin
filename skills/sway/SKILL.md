@@ -41,8 +41,10 @@ Two Kitty roles need application-defined identities rather than two indistinguis
 ## Pitfalls
 
 - `sway_launch` process success is not window correlation success. Correlation can return `matched`, `timeout`, or `ambiguous` and is never guaranteed.
+- `sway_window close` sends Sway's `kill`, which terminates the **client**. A client that owns several windows (single-instance terminal emulators, IDE windows, browser profiles) can therefore lose its other windows too. Confirm the client owns no other window before closing.
 - Directional moves and centered floating positions are compositor-dependent; inspect the returned state afterward.
 - Position, resize, and sticky require an explicit floating non-fullscreen window. Do not enable floating implicitly to satisfy them.
+- A persistent rule's `width_px`/`height_px` effects are applied by Sway when the window is mapped. Windows assigned to a workspace that is not visible can keep the size their client requested; re-check the geometry after the workspace is shown instead of assuming the rule won.
 - Sway 1.9 cannot reliably represent arbitrary relative insertion, saved-tree import, placeholder restoration, or a complete historical topology restore.
 - Do not manually edit plugin-owned generated configuration. Use `sway_rule` or `sway_startup` to update/remove it; manual changes are refused to prevent accidental overwrite.
 

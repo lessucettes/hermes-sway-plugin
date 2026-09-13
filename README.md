@@ -173,6 +173,14 @@ that exact value.
   `ambiguous` plus the evidence used. Process reuse, daemonizing applications,
   and identical identities remain limitations; a successful process start is
   never reported as a successful window match.
+- **`sway_window close` terminates the client, not just one view.** Sway's `kill`
+  signals the owning process, so closing one window of a multi-window client
+  (single-instance terminal emulator, IDE, browser) can close its other windows
+  as well. Check that the client owns no other window before closing it.
+- **Persistent geometry is applied at map time.** `width_px` / `height_px`
+  effects are issued by Sway's `for_window`; a window assigned to a workspace
+  that is not visible may keep the size its client requested. Verify the geometry
+  after the workspace is shown rather than assuming the rule won.
 - **Directional moves and centered positions are compositor-dependent.** The
   observed result is reported, and the plugin tells you to inspect the layout.
 - **Geometry and sticky actions require an explicit floating, non-fullscreen

@@ -2,18 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import time
+from typing import Any, Callable, Mapping
 
 from . import commands, ipc, tree
 from .errors import SwayPluginError
 from .resolve import resolve_target
 
+CLOSE_VERIFY_SECONDS = 2.0
+CLOSE_POLL_SECONDS = 0.1
+
 
 class RuntimeService:
     """Execute one typed mutation against fresh pre- and post-command trees."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        close_verify_seconds: float = CLOSE_VERIFY_SECONDS,
+        close_poll_seconds: float = CLOSE_POLL_SECONDS,
+    ) -> None:
         self._client = client
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._close_verify_seconds = close_verify_seconds
+        self._close_poll_seconds = close_poll_seconds
 
     def _snapshot(self) -> tree.Snapshot:
         ipc.assert_sway_19(self._client.request(ipc.GET_VERSION))
@@ -21,6 +37,22 @@ class RuntimeService:
 
     def _post_snapshot(self) -> tree.Snapshot:
         return tree.build_snapshot(self._client.request(ipc.GET_TREE))
+
+    def _wait_until_absent(self, con_id: int) -> bool:
+        """Poll fresh trees until a killed window is gone, or the deadline passes.
+
+        Sway's ``kill`` terminates the client asynchronously, so the window can be
+        present for a few hundred milliseconds after the command reply.
+        """
+
+        deadline = self._monotonic() + self._close_verify_seconds
+        while True:
+            if self._current_window(self._post_snapshot(), con_id) is None:
+                return True
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return False
+            self._sleep(min(self._close_poll_seconds, remaining))
 
     def _run(self, command: str) -> None:
         commands.command_or_raise(command, self._client.command(command))
@@ -245,12 +277,12 @@ class RuntimeService:
             raise SwayPluginError("invalid_argument", "unsupported window action", {"action": action})
 
         self._run(command)
-        after = self._post_snapshot()
-        current = self._current_window(after, node.id)
         if action == "close":
-            if current is not None:
+            if not self._wait_until_absent(node.id):
                 raise SwayPluginError("postcondition_failed", "window remained after close", {"con_id": node.id})
             return {"con_id": node.id, "action": action, "warnings": warnings}
+        after = self._post_snapshot()
+        current = self._current_window(after, node.id)
         if current is None:
             raise SwayPluginError(
                 "postcondition_failed",

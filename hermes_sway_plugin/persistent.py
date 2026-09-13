@@ -283,8 +283,29 @@ def _render_border(border: object) -> str:
     return f"border {style}" + (f" {width}" if width is not None else "")
 
 
+def _workspace_destination(name: object) -> str:
+    """Render a workspace target as a Sway ``assign``/``move`` operand.
+
+    Numeric names use the ``number`` form so Sway treats them as numbered
+    workspaces; everything else stays a quoted name.
+    """
+
+    text = _rule_text(name, "destination workspace")
+    if text.isdigit() and int(text) > 0:
+        return "number " + text
+    return _rule_quote(text, "destination workspace")
+
+
 def render_window_rule(rule: Mapping[str, Any]) -> str:
-    """Render one bounded window rule; require a matcher and visible outcome."""
+    """Render one bounded window rule; require a matcher and visible outcome.
+
+    A workspace destination becomes an ``assign`` statement because
+    ``for_window ... move container to workspace`` is undone often enough in Sway
+    1.9 that new windows regularly stay on the focused workspace.  Centering a
+    floating container re-parents it to the focused workspace, so when both a
+    destination and ``center`` are requested the destination move is re-issued as
+    the final statement of the ``for_window`` body.
+    """
 
     if not isinstance(rule, Mapping):
         raise RuleRenderError("window rule must be an object")
@@ -309,11 +330,17 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
     unknown = set(effects) - supported_effects
     if unknown:
         raise RuleRenderError(f"unsupported window effect: {sorted(unknown)[0]}")
-    commands: list[str] = []
+
+    assignment: str | None = None
+    destination_move: str | None = None
     if "workspace" in destination:
-        commands.append("move container to workspace " + _rule_quote(destination["workspace"], "destination workspace"))
-    if "output" in destination:
-        commands.append("move container to output " + _rule_quote(destination["output"], "destination output"))
+        target = _workspace_destination(destination["workspace"])
+        assignment = f"assign {criteria} workspace {target}"
+        destination_move = f"move container to workspace {target}"
+    elif "output" in destination:
+        destination_move = "move container to output " + _rule_quote(destination["output"], "destination output")
+
+    commands: list[str] = []
     for name, command in (("floating", "floating"), ("fullscreen", "fullscreen"), ("sticky", "sticky")):
         if name in effects:
             commands.append(command + (" enable" if _rule_bool(effects[name], name) else " disable"))
@@ -323,6 +350,9 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
         commands.append(f"resize set height {_rule_positive_int(effects['height_px'], 'height_px')} px")
     if "center" in effects and _rule_bool(effects["center"], "center"):
         commands.append("move position center")
+    if destination_move is not None:
+        # Re-assert the destination after any centering so the placement survives.
+        commands.append(destination_move)
     if "no_focus" in effects and _rule_bool(effects["no_focus"], "no_focus"):
         commands.append("no_focus")
     if "border" in effects:
@@ -334,7 +364,8 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
         commands.append(f"opacity {opacity:g}")
     if not commands:
         raise RuleRenderError("window rule requires at least one effect or destination")
-    return "for_window " + criteria + " " + ", ".join(commands)
+    statement = "for_window " + criteria + " " + ", ".join(commands)
+    return statement if assignment is None else assignment + "\n" + statement
 
 
 def render_workspace_output_rule(rule: Mapping[str, Any]) -> str:
