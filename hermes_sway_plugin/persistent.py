@@ -55,6 +55,10 @@ class AtomicWriteError(PersistentConfigError):
     """A managed include could not be safely committed to disk."""
 
 
+class ReloadRollbackError(PersistentConfigError):
+    """Sway did not confirm a reload and restoration could not be confirmed."""
+
+
 @dataclass(frozen=True)
 class IncludeConflict:
     kind: str
@@ -76,6 +80,13 @@ class AtomicWrite:
     target: Path
     candidate: Path
     backup: Path | None
+
+
+@dataclass(frozen=True)
+class ReloadResult:
+    reloaded: bool
+    rolled_back: bool
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -507,3 +518,30 @@ def atomic_replace(path: str | Path, content: str, *, backup_count: int = 3) -> 
             candidate.unlink(missing_ok=True)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+def _reload_and_wait(client: Any, timeout: float) -> None:
+    """Subscribe first so the reload event cannot race the command request."""
+
+    with client.subscribe(["workspace"]) as subscription:
+        client.command("reload")
+        subscription.wait_for(lambda _kind, body: body.get("change") == "reload", timeout)
+
+
+def reload_with_rollback(client: Any, restore: Any, *, timeout: float = 5.0) -> ReloadResult:
+    """Confirm Sway's reload event, or restore the prior include and reload it."""
+
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise ReloadRollbackError("reload timeout must be positive")
+    try:
+        _reload_and_wait(client, float(timeout))
+        return ReloadResult(True, False)
+    except Exception as original:
+        try:
+            restore()
+            _reload_and_wait(client, float(timeout))
+        except Exception as rollback_error:
+            raise ReloadRollbackError(
+                f"reload failed ({original}); rollback reload also failed ({rollback_error})"
+            ) from rollback_error
+        return ReloadResult(False, True, str(original))
