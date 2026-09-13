@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from hermes_sway_plugin import ipc
-from hermes_sway_plugin.launch import correlate_launch
+from hermes_sway_plugin.launch import correlate_launch, launch_and_correlate
 
 
 def _tree(*windows):
@@ -190,3 +190,36 @@ def test_correlate_launch_times_out_with_new_identity_mismatch_candidates_and_re
     assert any("exact expected identity" in reason for reason in result["reasons"])
     assert any("timed out" in reason for reason in result["reasons"])
     assert "not guaranteed" in result["reasons"][-1]
+
+
+def test_launch_and_correlate_baselines_before_using_the_injected_safe_process_factory(tmp_path):
+    record = []
+    client = Client([_tree(), _tree(_window(99))], record)
+    subscription = Events([(ipc.EVENT_WINDOW, {"change": "new"})])
+    captured = {}
+
+    class Process:
+        pid = 4242
+
+    def factory(argv, **kwargs):
+        record.append("launch")
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return Process()
+
+    result = launch_and_correlate(
+        client,
+        ["kitty", "--title", "chat"],
+        str(tmp_path),
+        expected_identity={"app_id": "kitty"},
+        timeout_seconds=1,
+        process_factory=factory,
+        subscription=subscription,
+    )
+
+    assert record == ["tree", "launch", "tree"]
+    assert result["status"] == "matched"
+    assert captured["argv"] == ["kitty", "--title", "chat"]
+    assert captured["shell"] is False
+    assert captured["close_fds"] is True
+    assert captured["start_new_session"] is True
