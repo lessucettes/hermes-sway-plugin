@@ -81,13 +81,19 @@ class RuntimeService:
             if current_before is None or not current_before.floating or current_before.fullscreen:
                 raise SwayPluginError("precondition_failed", "position requires a floating, non-fullscreen window")
             candidate = arguments.get("position")
-            if not isinstance(candidate, Mapping) or candidate.get("mode") != "coordinates":
-                raise SwayPluginError("invalid_argument", "position must specify coordinate mode")
-            x, y = candidate.get("x"), candidate.get("y")
-            if not all(isinstance(value, int) and not isinstance(value, bool) for value in (x, y)):
-                raise SwayPluginError("invalid_argument", "position coordinates must be integers")
-            position = candidate
-            command = f"{criterion} move position {x} px {y} px"
+            if not isinstance(candidate, Mapping):
+                raise SwayPluginError("invalid_argument", "position must be an object")
+            if candidate.get("mode") == "center":
+                command = f"{criterion} move position center"
+                warnings.append("centering is compositor-dependent; inspect the resulting geometry")
+            elif candidate.get("mode") == "coordinates":
+                x, y = candidate.get("x"), candidate.get("y")
+                if not all(isinstance(value, int) and not isinstance(value, bool) for value in (x, y)):
+                    raise SwayPluginError("invalid_argument", "position coordinates must be integers")
+                position = candidate
+                command = f"{criterion} move position {x} px {y} px"
+            else:
+                raise SwayPluginError("invalid_argument", "position mode must be center or coordinates")
         elif action == "move_to_scratchpad":
             command = f"{criterion} move scratchpad"
         elif action == "show_from_scratchpad":
@@ -155,8 +161,7 @@ class RuntimeService:
             current.rect is None or current.rect.width != width or current.rect.height != height
         ):
             raise SwayPluginError("postcondition_failed", "window size did not reach the requested dimensions", {"con_id": node.id})
-        elif action == "position":
-            assert position is not None
+        elif action == "position" and position is not None:
             if (
                 current.rect is None
                 or current.rect.x != position["x"]

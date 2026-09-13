@@ -56,3 +56,13 @@ def test_position_requires_a_floating_non_fullscreen_window_and_checks_coordinat
     )
 
     assert client.commands == ["[con_id=108] move position 50 px 60 px"]
+
+
+def test_position_center_keeps_floating_precondition_and_reports_placement_warning():
+    before = load_fixture("tree_mixed.json")
+    client = RuntimeClient([before, before])
+
+    result = RuntimeService(client).window({"con_id": 108}, "position", position={"mode": "center"})
+
+    assert result["warnings"] == ["centering is compositor-dependent; inspect the resulting geometry"]
+    assert client.commands == ["[con_id=108] move position center"]

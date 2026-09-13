@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hermes_sway_plugin import ipc
+from hermes_sway_plugin.errors import SwayPluginError
 from hermes_sway_plugin.runtime import RuntimeService
 
 from .helpers import RuntimeClient, focused_tree, load_fixture, moved_window_tree
@@ -54,3 +57,22 @@ def test_directional_move_returns_an_explicit_non_determinism_warning():
         "warnings": ["directional placement is compositor-dependent; inspect the resulting layout"],
     }
     assert client.commands == ["[con_id=103] move left"]
+
+
+def test_stale_target_is_rejected_before_any_command_is_sent():
+    client = RuntimeClient([load_fixture("tree_mixed.json")])
+
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).window({"con_id": 999_999}, "focus")
+
+    assert excinfo.value.code == "target_not_found"
+    assert client.commands == []
+
+
+def test_failed_move_postcondition_is_reported_from_the_fresh_tree():
+    unchanged = load_fixture("tree_mixed.json")
+    client = RuntimeClient([unchanged, unchanged])
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).window({"con_id": 103}, "move_to_workspace", workspace="1")
+
+    assert excinfo.value.code == "postcondition_failed"
