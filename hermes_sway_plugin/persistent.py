@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -31,6 +32,10 @@ class ManualEditRefused(PersistentConfigError):
 
 class CriteriaError(PersistentConfigError):
     """A declarative window matcher cannot be represented safely by Sway."""
+
+
+class RuleRenderError(PersistentConfigError):
+    """A persistent rule is incomplete or cannot be rendered safely."""
 
 
 @dataclass(frozen=True)
@@ -173,3 +178,123 @@ def render_criteria(match: Mapping[str, Any]) -> str:
 
 
 render_match_criteria = render_criteria
+
+
+def _rule_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value or "\n" in value or "\r" in value:
+        raise RuleRenderError(f"{label} must be a non-empty string without a line break or NUL")
+    return value
+
+
+def _rule_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise RuleRenderError(f"{label} must be a boolean")
+    return value
+
+
+def _rule_positive_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RuleRenderError(f"{label} must be a positive integer")
+    return value
+
+
+def _rule_quote(value: object, label: str) -> str:
+    return '"' + _sway_quoted(_rule_text(value, label)) + '"'
+
+
+def _render_border(border: object) -> str:
+    if not isinstance(border, Mapping) or set(border) - {"style", "width"}:
+        raise RuleRenderError("border must contain only style and optional width")
+    style = border.get("style")
+    if style not in {"none", "normal", "pixel"}:
+        raise RuleRenderError("border style must be none, normal, or pixel")
+    width = border.get("width")
+    if width is not None:
+        if isinstance(width, bool) or not isinstance(width, int) or width < 0:
+            raise RuleRenderError("border width must be a non-negative integer")
+        if style == "none":
+            raise RuleRenderError("border none cannot have a width")
+    if style == "pixel" and width is None:
+        raise RuleRenderError("border pixel requires a width")
+    return f"border {style}" + (f" {width}" if width is not None else "")
+
+
+def render_window_rule(rule: Mapping[str, Any]) -> str:
+    """Render one bounded window rule; require a matcher and visible outcome."""
+
+    if not isinstance(rule, Mapping):
+        raise RuleRenderError("window rule must be an object")
+    match = rule.get("match")
+    if not isinstance(match, Mapping):
+        raise RuleRenderError("window rule requires match")
+    try:
+        criteria = render_criteria(match)
+    except CriteriaError as exc:
+        raise RuleRenderError(str(exc)) from exc
+    destination = rule.get("destination", {})
+    effects = rule.get("effects", {})
+    if not isinstance(destination, Mapping) or set(destination) - {"workspace"}:
+        raise RuleRenderError("window destination can contain only workspace")
+    if not isinstance(effects, Mapping):
+        raise RuleRenderError("window effects must be an object")
+    supported_effects = {
+        "floating", "width_px", "height_px", "center", "fullscreen", "sticky", "no_focus", "border", "opacity"
+    }
+    unknown = set(effects) - supported_effects
+    if unknown:
+        raise RuleRenderError(f"unsupported window effect: {sorted(unknown)[0]}")
+    commands: list[str] = []
+    if "workspace" in destination:
+        commands.append("move container to workspace " + _rule_quote(destination["workspace"], "destination workspace"))
+    for name, command in (("floating", "floating"), ("fullscreen", "fullscreen"), ("sticky", "sticky")):
+        if name in effects:
+            commands.append(command + (" enable" if _rule_bool(effects[name], name) else " disable"))
+    if "width_px" in effects:
+        commands.append(f"resize set width {_rule_positive_int(effects['width_px'], 'width_px')} px")
+    if "height_px" in effects:
+        commands.append(f"resize set height {_rule_positive_int(effects['height_px'], 'height_px')} px")
+    if "center" in effects and _rule_bool(effects["center"], "center"):
+        commands.append("move position center")
+    if "no_focus" in effects and _rule_bool(effects["no_focus"], "no_focus"):
+        commands.append("no_focus")
+    if "border" in effects:
+        commands.append(_render_border(effects["border"]))
+    if "opacity" in effects:
+        opacity = effects["opacity"]
+        if isinstance(opacity, bool) or not isinstance(opacity, (int, float)) or not math.isfinite(opacity) or not 0 <= opacity <= 1:
+            raise RuleRenderError("opacity must be a finite number from 0 through 1")
+        commands.append(f"opacity {opacity:g}")
+    if not commands:
+        raise RuleRenderError("window rule requires at least one effect or destination")
+    return "for_window " + criteria + " " + ", ".join(commands)
+
+
+def render_workspace_output_rule(rule: Mapping[str, Any]) -> str:
+    """Render a workspace-to-output assignment without any shell interpolation."""
+
+    if not isinstance(rule, Mapping):
+        raise RuleRenderError("workspace-output rule must be an object")
+    if set(rule) - {"workspace", "outputs"}:
+        raise RuleRenderError("workspace-output rule contains unsupported fields")
+    workspace = _rule_quote(rule.get("workspace"), "workspace")
+    outputs = rule.get("outputs")
+    if isinstance(outputs, (str, bytes)) or not isinstance(outputs, (list, tuple)) or not outputs:
+        raise RuleRenderError("outputs must be a non-empty list")
+    rendered_outputs = [_rule_quote(output, "output") for output in outputs]
+    if len(set(outputs)) != len(outputs):
+        raise RuleRenderError("outputs must be unique")
+    return "workspace " + workspace + " output " + " ".join(rendered_outputs)
+
+
+def render_rule(rule: Mapping[str, Any]) -> str:
+    """Dispatch a typed persistent rule to its one supported Sway statement."""
+
+    if not isinstance(rule, Mapping):
+        raise RuleRenderError("rule must be an object")
+    kind = rule.get("kind")
+    payload = {key: value for key, value in rule.items() if key != "kind"}
+    if kind == "window":
+        return render_window_rule(payload)
+    if kind == "workspace_output":
+        return render_workspace_output_rule(payload)
+    raise RuleRenderError("rule kind must be window or workspace_output")
