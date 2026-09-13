@@ -426,15 +426,35 @@ class ManagedRulePaths:
     include: Path
 
 
-def managed_rule_paths(config_dir: str | Path) -> ManagedRulePaths:
-    """Resolve only a caller-supplied configuration directory; never a user default."""
+def resolve_managed_config_dir(config_dir: str | Path | None) -> tuple[Path, Path]:
+    """Resolve the owned include directory and the Sway configuration it augments.
 
-    if not isinstance(config_dir, (str, Path)) or not str(config_dir).strip():
-        raise ConfigFormatError("config_dir must be configured for persistent rules")
+    An explicit ``config_dir`` names the Sway configuration directory to manage,
+    so the owned include lives beside that configuration.  An empty setting uses
+    the documented XDG default: includes under
+    ``${XDG_CONFIG_HOME:-~/.config}/sway/hermes`` and the main configuration at
+    ``${XDG_CONFIG_HOME:-~/.config}/sway/config``.  The plugin never edits that
+    main configuration; it only reads it and requires the exact include line.
+    """
+
+    if config_dir in (None, ""):
+        base = (os.environ.get("XDG_CONFIG_HOME") or "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".config"
+        sway_home = root / "sway"
+        return sway_home / "hermes", sway_home / "config"
+    if not isinstance(config_dir, (str, Path)):
+        raise ConfigFormatError("config_dir must be a string or path")
     directory = Path(config_dir).expanduser()
     if not directory.is_absolute():
         raise ConfigFormatError("config_dir must be an absolute path")
-    return ManagedRulePaths(directory, directory / _RULE_MAIN_CONFIG_NAME, directory / _RULE_CONFIG_NAME)
+    return directory, directory / _RULE_MAIN_CONFIG_NAME
+
+
+def managed_rule_paths(config_dir: str | Path | None) -> ManagedRulePaths:
+    """Resolve the owned rule include beside the Sway configuration it augments."""
+
+    directory, main_config = resolve_managed_config_dir(config_dir)
+    return ManagedRulePaths(directory, main_config, directory / _RULE_CONFIG_NAME)
 
 
 def _copy_json(value: Any) -> Any:
@@ -612,17 +632,11 @@ class ManagedStartupPaths:
     include: Path
 
 
-def managed_startup_paths(config_dir: str | Path) -> ManagedStartupPaths:
-    """Resolve only a caller-supplied configuration directory; never a user default."""
+def managed_startup_paths(config_dir: str | Path | None) -> ManagedStartupPaths:
+    """Resolve the owned startup include beside a caller-supplied main config."""
 
-    if not isinstance(config_dir, (str, Path)) or not str(config_dir).strip():
-        raise ConfigFormatError("config_dir must be configured for persistent startup entries")
-    directory = Path(config_dir).expanduser()
-    if not directory.is_absolute():
-        raise ConfigFormatError("config_dir must be an absolute path")
-    return ManagedStartupPaths(
-        directory, directory / _STARTUP_MAIN_CONFIG_NAME, directory / _STARTUP_CONFIG_NAME
-    )
+    directory, main_config = resolve_managed_config_dir(config_dir)
+    return ManagedStartupPaths(directory, main_config, directory / _STARTUP_CONFIG_NAME)
 
 
 def _startup_argv(argv: object) -> list[str]:
