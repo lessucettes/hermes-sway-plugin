@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from .errors import SwayPluginError, error
-
+from .errors import READ_ONLY, SwayPluginError, error, ok
+from . import ipc, tree
 
 ConfigGetter = Callable[..., Any]
+IPCFactory = Callable[..., Any]
+
+_INSPECT_VIEWS = {"summary", "windows", "workspaces", "outputs", "tree", "marks"}
 
 
 def _settings(get_config: ConfigGetter) -> Mapping[str, Any]:
@@ -27,39 +30,185 @@ def _require(args: Mapping[str, Any], key: str) -> Any:
     return args[key]
 
 
-def sway_inspect(args: Mapping[str, Any], get_config: ConfigGetter, **kwargs: Any) -> str:
-    raise SwayPluginError(
-        "internal_error",
-        "sway_inspect is not implemented yet",
-        {},
-        recoverable=False,
+def _bounded_int(value: object, name: str, default: int, minimum: int, maximum: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+        raise SwayPluginError(
+            "invalid_argument",
+            f"{name} must be an integer from {minimum} to {maximum}",
+            {"argument": name},
+        )
+    return value
+
+
+def _boolean(value: object, name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise SwayPluginError("invalid_argument", f"{name} must be a boolean", {"argument": name})
+    return value
+
+
+def _compact_version(version: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: version[key]
+        for key in ("human_readable", "variant", "major", "minor", "patch")
+        if key in version
+    }
+
+
+def _matches_window(window: tree.WindowSummary, criteria: Mapping[str, Any]) -> bool:
+    exact = {
+        "workspace": window.workspace,
+        "output": window.output,
+        "app_id": window.app_id,
+        "class": window.x11_class,
+        "instance": window.x11_instance,
+        "mark": None,
+        "shell": window.shell,
+        "floating": window.floating,
+        "focused": window.focused,
+    }
+    for key, actual in exact.items():
+        if key not in criteria:
+            continue
+        expected = criteria[key]
+        if key == "mark":
+            if not isinstance(expected, str) or expected not in window.marks:
+                return False
+        elif actual != expected:
+            return False
+    title_contains = criteria.get("title_contains")
+    if title_contains is not None:
+        if not isinstance(title_contains, str) or title_contains.casefold() not in (window.title or "").casefold():
+            return False
+    return True
+
+
+def _inspect_data(
+    client: Any,
+    view: str,
+    criteria: Mapping[str, Any],
+    max_results: int,
+    include_geometry: bool,
+) -> dict[str, Any]:
+    version = ipc.assert_sway_19(client.request(ipc.GET_VERSION))
+    snapshot = tree.build_snapshot(client.request(ipc.GET_TREE))
+    outputs = tree.parse_outputs(client.request(ipc.GET_OUTPUTS))
+    workspace_records = snapshot.workspaces(
+        include_scratchpad=bool(criteria.get("include_scratchpad", False))
     )
+    marks = tree.parse_marks(client.request(ipc.GET_MARKS))
+    windows = [
+        window
+        for window in snapshot.windows(
+            include_scratchpad=bool(criteria.get("include_scratchpad", False))
+        )
+        if _matches_window(window, criteria)
+    ]
+    focused = snapshot.focused_window()
+    common = {
+        "version": _compact_version(version),
+        "focused": {
+            "window": focused.compact(include_geometry=include_geometry) if focused else None,
+            "workspace": snapshot.focused_workspace,
+            "output": snapshot.focused_output,
+        },
+    }
+
+    if view == "summary":
+        return {
+            **common,
+            "counts": {
+                "windows": len(snapshot.windows()),
+                "workspaces": len(snapshot.workspaces()),
+                "outputs": len(outputs),
+                "marks": len(marks),
+            },
+        }
+    if view == "tree":
+        return {**common, "tree": tree.compact_tree(snapshot)}
+    if view == "marks":
+        selected = list(marks)
+    elif view == "windows":
+        selected = [window.compact(include_geometry=include_geometry) for window in windows]
+    elif view == "workspaces":
+        selected = [workspace.compact(include_geometry=include_geometry) for workspace in workspace_records]
+    else:
+        selected = [output.compact(include_geometry=include_geometry) for output in outputs]
+
+    matched_count = len(selected)
+    returned = selected[:max_results]
+    return {
+        **common,
+        "items": returned,
+        "matched_count": matched_count,
+        "returned_count": len(returned),
+        "truncated": matched_count > len(returned),
+    }
+
+
+def sway_inspect(
+    args: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+    **kwargs: Any,
+) -> str:
+    """Return a bounded compact desktop snapshot from a live Sway 1.9 session."""
+    if not isinstance(args, Mapping):
+        raise SwayPluginError("invalid_argument", "arguments must be an object")
+    view = _require(args, "view")
+    if not isinstance(view, str) or view not in _INSPECT_VIEWS:
+        raise SwayPluginError("invalid_argument", f"view must be one of {sorted(_INSPECT_VIEWS)}")
+    criteria = args.get("filter", {})
+    if not isinstance(criteria, Mapping):
+        raise SwayPluginError("invalid_argument", "filter must be an object", {"argument": "filter"})
+    max_results = _bounded_int(args.get("max_results"), "max_results", 50, 1, 200)
+    include_geometry = _boolean(args.get("include_geometry"), "include_geometry", True)
+    timeout = settings.get("ipc_timeout_seconds", 3.0)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
+    client = ipc_factory(timeout=float(timeout))
+    return ok(READ_ONLY, _inspect_data(client, view, criteria, max_results, include_geometry))
 
 
 def _not_implemented(tool: str) -> Callable[..., str]:
-    def handler(args: Mapping[str, Any], get_config: ConfigGetter, **kwargs: Any) -> str:
+    def handler(args: Mapping[str, Any], settings: Mapping[str, Any], **kwargs: Any) -> str:
         raise SwayPluginError("internal_error", f"{tool} is not implemented yet", {}, recoverable=False)
 
     return handler
 
 
-def build_handlers(get_config: ConfigGetter) -> dict[str, Callable[..., str]]:
-    """Bind every tool handler to the plugin settings getter."""
+def _translate_exception(exc: Exception) -> SwayPluginError:
+    if isinstance(exc, SwayPluginError):
+        return exc
+    if isinstance(exc, ipc.SwayUnavailable):
+        return SwayPluginError("sway_unavailable", str(exc))
+    if isinstance(exc, ipc.SwayTimeout):
+        return SwayPluginError("ipc_timeout", str(exc))
+    if isinstance(exc, ipc.SwayPayloadTooLarge):
+        return SwayPluginError("payload_too_large", str(exc))
+    if isinstance(exc, (ipc.SwayProtocolError, tree.TreeFormatError)):
+        return SwayPluginError("ipc_protocol_error", str(exc))
+    return SwayPluginError("internal_error", f"{type(exc).__name__}: {exc}", recoverable=False)
+
+
+def build_handlers(
+    get_config: ConfigGetter,
+    *,
+    ipc_factory: IPCFactory = ipc.SwayIPC,
+) -> dict[str, Callable[..., str]]:
+    """Bind every tool handler to configuration and optional test dependencies."""
 
     def bind(func: Callable[..., str]) -> Callable[[Mapping[str, Any]], str]:
         def bound(args: Mapping[str, Any], **kwargs: Any) -> str:
             try:
                 settings = _settings(get_config)
-            except SwayPluginError:
-                raise
-            except Exception as exc:  # settings are caller-supplied; never leak
-                return error(SwayPluginError("internal_error", f"cannot read plugin settings: {exc}"))
-            try:
-                return func(args, settings, **kwargs)
-            except SwayPluginError as exc:
-                return error(exc)
+                return func(args, settings, ipc_factory=ipc_factory, **kwargs)
             except Exception as exc:
-                return error(exc)
+                return error(_translate_exception(exc))
 
         return bound
 
@@ -73,4 +222,5 @@ def build_handlers(get_config: ConfigGetter) -> dict[str, Callable[..., str]]:
         "sway_startup": bind(_not_implemented("sway_startup")),
     }
 
-__all__ = ["build_handlers", "sway_inspect", "ConfigGetter"]
+
+__all__ = ["build_handlers", "sway_inspect", "ConfigGetter", "IPCFactory"]
