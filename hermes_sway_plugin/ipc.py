@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -32,6 +33,9 @@ SWAY_19_MAJOR = 1
 SWAY_19_MINOR = 9
 DEFAULT_TIMEOUT = 3.0
 DISCOVERY_TIMEOUT = 3.0
+# `sway --version` prints e.g. "sway version 1.9"; release candidates look like
+# "sway version 1.10-rc2", so only the leading major/minor/patch triple is read.
+_VERSION_TOKEN = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
 
 class SwayUnavailable(Exception):
@@ -160,24 +164,17 @@ def sway_binary_version(timeout: float = DISCOVERY_TIMEOUT) -> dict:
             f"`sway --version` exited {probe.returncode}: {probe.stderr.strip()[:200]}"
         )
     text = f"{probe.stdout} {probe.stderr}".strip()
-    numbers: list[int] = []
-    for token in text.replace("-", " ").split():
-        if token and token[0].isdigit() and token.split(".")[0].isdigit():
-            head = token.split(".")[0]
-            try:
-                numbers.append(int(head))
-            except ValueError:
-                continue
-            if len(numbers) >= 2:
-                break
-    if not numbers:
+    match = _VERSION_TOKEN.search(text)
+    if match is None:
         raise SwayUnavailable(f"cannot parse a version out of `sway --version`: {text[:200]}")
-    minor = numbers[1] if len(numbers) > 1 else 0
+    major, minor = int(match.group(1)), int(match.group(2))
+    patch = int(match.group(3)) if match.group(3) else 0
     return {
-        "human_readable": text.split()[-1] if text else "",
+        "human_readable": f"{major}.{minor}" + (f".{patch}" if patch else ""),
         "variant": "sway",
-        "major": numbers[0],
+        "major": major,
         "minor": minor,
+        "patch": patch,
     }
 
 
