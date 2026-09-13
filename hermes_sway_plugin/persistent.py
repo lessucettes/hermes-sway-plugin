@@ -7,10 +7,13 @@ locations.  Callers supply every path and every side-effecting dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -44,12 +47,35 @@ class CardinalityError(PersistentConfigError):
     """The current desktop cannot verify a rule's intended cardinality."""
 
 
+class ConfigValidationError(PersistentConfigError):
+    """Sway rejected a candidate or main configuration in check-only mode."""
+
+
+class AtomicWriteError(PersistentConfigError):
+    """A managed include could not be safely committed to disk."""
+
+
 @dataclass(frozen=True)
 class IncludeConflict:
     kind: str
     source: Path
     line: int
     text: str
+
+
+@dataclass(frozen=True)
+class ConfigValidation:
+    path: Path
+    ok: bool
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True)
+class AtomicWrite:
+    target: Path
+    candidate: Path
+    backup: Path | None
 
 
 @dataclass(frozen=True)
@@ -408,3 +434,76 @@ def scan_include_conflicts(main_config: str | Path, *, managed_include: str | Pa
 
     visit(root)
     return tuple(found)
+
+
+def validate_sway_config(path: str | Path, subprocess_run: Any, *, sway_binary: str = "sway") -> ConfigValidation:
+    """Run ``sway -C`` through an injected runner; never invoke a shell."""
+
+    config_path = Path(path)
+    if not config_path.is_file():
+        raise ConfigValidationError(f"configuration does not exist: {config_path}")
+    try:
+        result = subprocess_run([sway_binary, "-C", "-c", str(config_path)], text=True, capture_output=True, check=False)
+    except OSError as exc:
+        raise ConfigValidationError(f"cannot execute {sway_binary}: {exc}") from exc
+    stdout = getattr(result, "stdout", "") or ""
+    stderr = getattr(result, "stderr", "") or ""
+    if getattr(result, "returncode", None) != 0:
+        detail = str(stderr or stdout or f"exit status {getattr(result, 'returncode', '?')}")
+        raise ConfigValidationError(f"Sway configuration validation failed: {detail[:2000]}")
+    return ConfigValidation(config_path, True, str(stdout), str(stderr))
+
+
+def validate_candidate_and_main(candidate: str | Path, main_config: str | Path, subprocess_run: Any, *, sway_binary: str = "sway") -> tuple[ConfigValidation, ConfigValidation]:
+    """Check both the proposed include-aware candidate and the main config."""
+
+    return (
+        validate_sway_config(candidate, subprocess_run, sway_binary=sway_binary),
+        validate_sway_config(main_config, subprocess_run, sway_binary=sway_binary),
+    )
+
+
+def atomic_replace(path: str | Path, content: str, *, backup_count: int = 3) -> AtomicWrite:
+    """Lock, stage beside, back up, and atomically replace a managed include."""
+
+    target = Path(path)
+    if not isinstance(content, str) or "\x00" in content:
+        raise AtomicWriteError("replacement content must be text without NUL")
+    if backup_count < 0:
+        raise AtomicWriteError("backup_count cannot be negative")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(target.name + ".lock")
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    candidate: Path | None = None
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, prefix=target.name + ".candidate.", delete=False) as handle:
+            candidate = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        backup: Path | None = None
+        if target.exists() and backup_count:
+            oldest = target.with_name(target.name + f".bak.{backup_count}")
+            oldest.unlink(missing_ok=True)
+            for number in range(backup_count - 1, 0, -1):
+                source = target.with_name(target.name + f".bak.{number}")
+                if source.exists():
+                    os.replace(source, target.with_name(target.name + f".bak.{number + 1}"))
+            backup = target.with_name(target.name + ".bak.1")
+            os.replace(target, backup)
+        os.replace(candidate, target)
+        candidate = None
+        directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return AtomicWrite(target, target.parent / (target.name + ".candidate.committed"), backup)
+    except OSError as exc:
+        raise AtomicWriteError(f"atomic write failed for {target}: {exc}") from exc
+    finally:
+        if candidate is not None:
+            candidate.unlink(missing_ok=True)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
