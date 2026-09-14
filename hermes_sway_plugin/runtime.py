@@ -11,6 +11,46 @@ from .resolve import resolve_target
 
 CLOSE_VERIFY_SECONDS = 2.0
 CLOSE_POLL_SECONDS = 0.1
+RESERVED_WORKSPACE_SELECTORS = frozenset(
+    {
+        "next",
+        "prev",
+        "next_on_output",
+        "prev_on_output",
+        "current",
+        "back_and_forth",
+        "number",
+    }
+)
+
+
+def _exact_workspace_name(value: object, argument: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise SwayPluginError("invalid_argument", f"{argument} must be a non-empty string")
+    if value.casefold() in RESERVED_WORKSPACE_SELECTORS:
+        raise SwayPluginError(
+            "invalid_argument",
+            f"{argument} must not be a reserved Sway workspace selector",
+            {argument: value},
+        )
+    return value
+
+
+def _reject_workspace_case_collision(name: str, existing_names: set[str]) -> None:
+    collision = next(
+        (
+            existing_name
+            for existing_name in existing_names
+            if existing_name != name and existing_name.casefold() == name.casefold()
+        ),
+        None,
+    )
+    if collision is not None:
+        raise SwayPluginError(
+            "precondition_failed",
+            "workspace name collides case-insensitively with an existing workspace",
+            {"workspace": name, "existing_workspace": collision},
+        )
 
 
 class RuntimeService:
@@ -41,8 +81,8 @@ class RuntimeService:
     def _wait_until_absent(self, con_id: int) -> bool:
         """Poll fresh trees until a killed window is gone, or the deadline passes.
 
-        Sway's ``kill`` terminates the client asynchronously, so the window can be
-        present for a few hundred milliseconds after the command reply.
+        Sway's ``kill`` requests that the client close the view. The window can
+        remain briefly, indefinitely, or disappear asynchronously after the reply.
         """
 
         deadline = self._monotonic() + self._close_verify_seconds
@@ -86,15 +126,10 @@ class RuntimeService:
                     "set_parent_layout requires a target with a live parent container",
                     {"con_id": node.id},
                 )
-            # Sway's con_id criterion does not address workspace containers: targeting
-            # the workspace id is rejected, so a window whose parent is a workspace is
-            # addressed directly and Sway wraps its siblings into the new layout.
-            criterion = (
-                commands.criterion_for_con_id(node.id)
-                if parent.type == "workspace"
-                else commands.criterion_for_con_id(parent.id)
-            )
-            self._run(f"{criterion} layout {layout}")
+            # Sway's ``layout`` command operates on the selected container's
+            # parent. Select the target itself for both nested and workspace-parent
+            # cases; selecting the parent would change one level too high.
+            self._run(f"{commands.criterion_for_con_id(node.id)} layout {layout}")
             after = self._post_snapshot()
             current = after.node(node.id)
             if current is None:
@@ -110,24 +145,21 @@ class RuntimeService:
                     "target no longer has a live parent after setting its parent layout",
                     {"con_id": node.id, "action": action},
                 )
-            if layout != "default":
-                # Sway may satisfy the request by wrapping the target (and its
-                # siblings) in a new container, or by setting the layout on the
-                # workspace itself, so accept either observed level.
-                workspace = after.node(current_parent.parent_id) if current_parent.parent_id is not None else None
-                observed = {current_parent.layout, current.layout}
-                if workspace is not None:
-                    observed.add(workspace.layout)
-                if layout not in observed:
-                    raise SwayPluginError(
-                        "postcondition_failed",
-                        "target parent did not reach the requested layout",
-                        {"con_id": node.id, "layout": layout, "observed_layout": current_parent.layout},
-                    )
+            if layout != "default" and current_parent.layout != layout:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "target parent did not reach the requested layout",
+                    {
+                        "con_id": node.id,
+                        "layout": layout,
+                        "observed_layout": current_parent.layout,
+                        "observed_parent_con_id": current_parent.id,
+                    },
+                )
             return {
                 "action": action,
                 "con_id": node.id,
-                "parent_con_id": parent.id,
+                "parent_con_id": current_parent.id,
                 "layout": layout,
                 "warnings": warnings,
             }
@@ -202,24 +234,29 @@ class RuntimeService:
 
     def window(self, target: object, action: str, **arguments: Any) -> dict[str, Any]:
         """Apply one window mutation and assert its observable postcondition."""
+        workspace = (
+            _exact_workspace_name(arguments.get("workspace"), "workspace")
+            if action == "move_to_workspace"
+            else None
+        )
         before = self._snapshot()
         node = resolve_target(before, target, window_only=True)
         criterion = commands.criterion_for_con_id(node.id)
         warnings: list[str] = []
-        workspace: str | None = None
         output: str | None = None
         enabled: bool | None = None
         width: int | None = None
         height: int | None = None
+        unit: str | None = None
         position: Mapping[str, Any] | None = None
+        expected_position: tuple[int, int] | None = None
         mark: str | None = None
         if action == "focus":
             command = f"{criterion} focus"
         elif action == "move_to_workspace":
-            workspace = arguments.get("workspace")
-            if not isinstance(workspace, str) or not workspace:
-                raise SwayPluginError("invalid_argument", "workspace must be a non-empty string")
-            command = f"{criterion} move container to workspace {commands.quote(workspace)}"
+            assert workspace is not None
+            _reject_workspace_case_collision(workspace, {item.name for item in before.workspaces()})
+            command = f"{criterion} move --no-auto-back-and-forth container to workspace {commands.quote(workspace)}"
         elif action == "move_to_output":
             output = arguments.get("output")
             if not isinstance(output, str) or not output:
@@ -260,10 +297,42 @@ class RuntimeService:
                 warnings.append("centering is compositor-dependent; inspect the resulting geometry")
             elif candidate.get("mode") == "coordinates":
                 x, y = candidate.get("x"), candidate.get("y")
-                if not all(isinstance(value, int) and not isinstance(value, bool) for value in (x, y)):
+                if (
+                    not isinstance(x, int)
+                    or isinstance(x, bool)
+                    or not isinstance(y, int)
+                    or isinstance(y, bool)
+                ):
                     raise SwayPluginError("invalid_argument", "position coordinates must be integers")
+                x_value, y_value = x, y
+                absolute = candidate.get("absolute", False)
+                if not isinstance(absolute, bool):
+                    raise SwayPluginError("invalid_argument", "position.absolute must be a boolean")
                 position = candidate
-                command = f"{criterion} move position {x} px {y} px"
+                if absolute:
+                    expected_position = (x_value, y_value)
+                    command = f"{criterion} move absolute position {x_value} px {y_value} px"
+                else:
+                    workspace_name = current_before.workspace or before.focused_workspace
+                    workspace_node = next(
+                        (
+                            item
+                            for item in before.nodes.values()
+                            if item.type == "workspace" and item.name == workspace_name
+                        ),
+                        None,
+                    )
+                    if workspace_node is None or workspace_node.rect is None:
+                        raise SwayPluginError(
+                            "precondition_failed",
+                            "relative position requires an observable workspace origin",
+                            {"con_id": node.id, "workspace": workspace_name},
+                        )
+                    expected_position = (
+                        workspace_node.rect.x + x_value,
+                        workspace_node.rect.y + y_value,
+                    )
+                    command = f"{criterion} move position {x_value} px {y_value} px"
             else:
                 raise SwayPluginError("invalid_argument", "position mode must be center or coordinates")
         elif action == "move_to_scratchpad":
@@ -294,9 +363,16 @@ class RuntimeService:
 
         self._run(command)
         if action == "close":
-            if not self._wait_until_absent(node.id):
-                raise SwayPluginError("postcondition_failed", "window remained after close", {"con_id": node.id})
-            return {"con_id": node.id, "action": action, "warnings": warnings}
+            closed = self._wait_until_absent(node.id)
+            if not closed:
+                warnings.append("close_requested_but_window_still_observed")
+            return {
+                "con_id": node.id,
+                "action": action,
+                "close_requested": True,
+                "closed_observed": closed,
+                "warnings": warnings,
+            }
         after = self._post_snapshot()
         current = self._current_window(after, node.id)
         if current is None:
@@ -329,20 +405,20 @@ class RuntimeService:
             raise SwayPluginError("postcondition_failed", "window floating state did not change", {"con_id": node.id})
         elif action == "set_fullscreen" and current.fullscreen != enabled:
             raise SwayPluginError("postcondition_failed", "window fullscreen state did not change", {"con_id": node.id})
-        elif action == "resize" and (
-            current.rect is None or current.rect.width != width or current.rect.height != height
-        ):
-            raise SwayPluginError("postcondition_failed", "window size did not reach the requested dimensions", {"con_id": node.id})
-        elif action == "position" and position is not None:
+        elif action == "position" and expected_position is not None:
             if (
                 current.rect is None
-                or current.rect.x != position["x"]
-                or current.rect.y != position["y"]
+                or current.rect.x != expected_position[0]
+                or current.rect.y != expected_position[1]
             ):
                 raise SwayPluginError(
                     "postcondition_failed",
                     "window position did not reach the requested coordinates",
-                    {"con_id": node.id},
+                    {
+                        "con_id": node.id,
+                        "expected": {"x": expected_position[0], "y": expected_position[1]},
+                        "observed": current.rect.compact() if current.rect else None,
+                    },
                 )
         elif action == "move_to_scratchpad" and not current.scratchpad:
             raise SwayPluginError("postcondition_failed", "window did not enter the scratchpad", {"con_id": node.id})
@@ -354,28 +430,41 @@ class RuntimeService:
             raise SwayPluginError("postcondition_failed", "mark was not applied", {"con_id": node.id, "mark": mark})
         elif action == "unmark" and mark in current.marks:
             raise SwayPluginError("postcondition_failed", "mark was not removed", {"con_id": node.id, "mark": mark})
-        return {"con_id": node.id, "action": action, "warnings": warnings}
+        result = {"con_id": node.id, "action": action, "warnings": warnings}
+        if action in {"resize", "position"}:
+            result["observed"] = {
+                "rect": current.rect.compact() if current.rect is not None else None,
+            }
+        if action == "resize":
+            result["requested"] = {"width": width, "height": height, "unit": unit}
+        return result
+
     def workspace(self, action: str, workspace: object, **arguments: Any) -> dict[str, Any]:
         """Apply one workspace mutation and verify it from a fresh tree."""
-        if not isinstance(workspace, str) or not workspace:
-            raise SwayPluginError("invalid_argument", "workspace must be a non-empty string")
+        workspace = _exact_workspace_name(workspace, "workspace")
+        new_name = (
+            _exact_workspace_name(arguments.get("new_name"), "new_name")
+            if action == "rename"
+            else None
+        )
         before = self._snapshot()
         existing = {item.name: item for item in before.workspaces()}
+        existing_names = set(existing)
+        existing_casefolded = {name.casefold() for name in existing_names}
+        _reject_workspace_case_collision(workspace, existing_names)
         warnings: list[str] = []
         result_workspace = workspace
         prior_focus = before.focused_workspace
         output: str | None = None
         restore_focus = False
         if action == "focus_or_create":
-            command = f"workspace {commands.quote(workspace)}"
+            command = f"workspace --no-auto-back-and-forth {commands.quote(workspace)}"
             self._run(command)
         elif action == "rename":
-            new_name = arguments.get("new_name")
+            assert new_name is not None
             if workspace not in existing:
                 raise SwayPluginError("target_not_found", "workspace does not currently exist", {"workspace": workspace})
-            if not isinstance(new_name, str) or not new_name:
-                raise SwayPluginError("invalid_argument", "new_name must be a non-empty string")
-            if new_name in existing:
+            if new_name.casefold() in existing_casefolded:
                 raise SwayPluginError("precondition_failed", "a workspace already has the new name", {"workspace": new_name})
             result_workspace = new_name
             self._run(f"rename workspace {commands.quote(workspace)} to {commands.quote(new_name)}")
@@ -388,9 +477,12 @@ class RuntimeService:
                 raise SwayPluginError("invalid_argument", "output must be a non-empty string")
             if not isinstance(restore_focus, bool):
                 raise SwayPluginError("invalid_argument", "restore_focus must be a boolean")
-            self._run(f"workspace {commands.quote(workspace)}; move workspace to output {commands.quote(output)}")
+            self._run(
+                f"workspace --no-auto-back-and-forth {commands.quote(workspace)}; "
+                f"move workspace to output {commands.quote(output)}"
+            )
             if restore_focus and prior_focus is not None and prior_focus != workspace:
-                self._run(f"workspace {commands.quote(prior_focus)}")
+                self._run(f"workspace --no-auto-back-and-forth {commands.quote(prior_focus)}")
         else:
             raise SwayPluginError("invalid_argument", "unsupported workspace action", {"action": action})
 

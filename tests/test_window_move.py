@@ -8,7 +8,7 @@ from hermes_sway_plugin import ipc
 from hermes_sway_plugin.errors import SwayPluginError
 from hermes_sway_plugin.runtime import RuntimeService
 
-from .helpers import RuntimeClient, focused_tree, load_fixture, moved_window_tree
+from .helpers import RuntimeClient, focused_tree, load_fixture, moved_window_tree, updated_node_tree
 
 
 def test_focus_resolves_one_fresh_target_executes_typed_command_and_verifies_post_tree():
@@ -31,7 +31,29 @@ def test_move_to_workspace_uses_exact_name_and_verifies_the_destination():
     result = RuntimeService(client).window({"con_id": 103}, "move_to_workspace", workspace="1")
 
     assert result == {"con_id": 103, "action": "move_to_workspace", "warnings": []}
-    assert client.commands == ['[con_id=103] move container to workspace "1"']
+    assert client.commands == ['[con_id=103] move --no-auto-back-and-forth container to workspace "1"']
+
+
+def test_move_to_workspace_rejects_a_reserved_selector_without_a_command():
+    client = RuntimeClient([])
+
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).window({"con_id": 103}, "move_to_workspace", workspace="CuRrEnT")
+
+    assert excinfo.value.code == "invalid_argument"
+    assert client.requests == []
+    assert client.commands == []
+
+
+def test_move_to_workspace_rejects_a_case_insensitive_existing_name_collision():
+    before = updated_node_tree(load_fixture("tree_mixed.json"), 93, name="Dev")
+    client = RuntimeClient([before])
+
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).window({"con_id": 103}, "move_to_workspace", workspace="dEV")
+
+    assert excinfo.value.code == "precondition_failed"
+    assert client.commands == []
 
 
 def test_move_to_output_uses_exact_name_and_verifies_the_destination():

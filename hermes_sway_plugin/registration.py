@@ -15,10 +15,16 @@ from .handlers import build_handlers
 TOOLSET = "sway"
 SKILL_NAME = "sway"
 SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / SKILL_NAME / "SKILL.md"
-SKILL_DESCRIPTION = (
-    "Inspect and control a Sway 1.9 desktop, and persist autonomous window, "
-    "workspace-output, and startup configuration that survives without Hermes."
-)
+SKILL_FRONTMATTER: dict[str, Any] = {
+    "name": SKILL_NAME,
+    "description": "Control Sway windows, workspaces, layouts, and rules.",
+    "version": "0.2.0",
+    "author": "lessucettes, Hermes Agent",
+    "license": "MIT",
+    "platforms": ["linux"],
+    "metadata": {"hermes": {"tags": ["sway", "wayland", "linux", "desktop"]}},
+}
+SKILL_DESCRIPTION = SKILL_FRONTMATTER["description"]
 
 
 def _runtime_available() -> bool:
@@ -68,19 +74,8 @@ def register(ctx: Any) -> None:
         SKILL_NAME,
         SKILL_PATH,
         description=SKILL_DESCRIPTION,
-        frontmatter=_skill_frontmatter(),
+        frontmatter=SKILL_FRONTMATTER,
     )
-
-
-def _skill_frontmatter() -> dict[str, Any]:
-    """Frontmatter for the bundled skill; kept here so the path stays the contract."""
-    return {
-        "name": SKILL_NAME,
-        "description": SKILL_DESCRIPTION,
-        "version": "0.1.0",
-        "platforms": ["linux"],
-        "metadata": {"hermes": {"tags": ["sway", "wayland", "linux", "desktop"]}},
-    }
 
 
 def tool_names() -> Iterable[str]:

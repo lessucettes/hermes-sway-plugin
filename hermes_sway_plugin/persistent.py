@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shlex
+import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -82,10 +83,27 @@ class ConfigValidation:
 
 
 @dataclass(frozen=True)
+class FileRevision:
+    """Identity and content revision observed during one exact file read."""
+
+    exists: bool
+    device: int | None = None
+    inode: int | None = None
+    mode: int | None = None
+    digest: str | None = None
+
+
+@dataclass(frozen=True)
 class AtomicWrite:
     target: Path
     candidate: Path
     backup: Path | None
+    prior_bytes: bytes | None = None
+    prior_mode: int | None = None
+    prior_digest: str | None = None
+    target_device: int | None = None
+    target_inode: int | None = None
+    target_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,7 +255,18 @@ def render_criteria(match: Mapping[str, Any]) -> str:
             raise CriteriaError(f"criterion {key} value must be a non-empty string")
         if mode not in {"exact", "regex"}:
             raise CriteriaError(f"criterion {key} mode must be exact or regex")
-        expression = "^" + _escape_exact_pcre(value) + "$" if mode == "exact" else value
+        if key == "window_type":
+            allowed_types = {
+                "normal", "dialog", "utility", "toolbar", "splash", "menu",
+                "dropdown_menu", "popup_menu", "tooltip", "notification",
+            }
+            if mode != "exact":
+                raise CriteriaError("criterion window_type does not support regex mode in Sway 1.9")
+            if value.casefold() not in allowed_types:
+                raise CriteriaError("criterion window_type has an unsupported Sway 1.9 value")
+            expression = value
+        else:
+            expression = "^" + _escape_exact_pcre(value) + "$" if mode == "exact" else value
         parts.append(f'{key}="{_sway_quoted(expression)}"')
     return "[" + " ".join(parts) + "]"
 
@@ -300,12 +329,9 @@ def _workspace_destination(name: object) -> str:
 def render_window_rule(rule: Mapping[str, Any]) -> str:
     """Render one bounded window rule; require a matcher and visible outcome.
 
-    A workspace destination becomes an ``assign`` statement because
-    ``for_window ... move container to workspace`` is undone often enough in Sway
-    1.9 that new windows regularly stay on the focused workspace.  Centering a
-    floating container re-parents it to the focused workspace, so when both a
-    destination and ``center`` are requested the destination move is re-issued as
-    the final statement of the ``for_window`` body.
+    Placement uses Sway's native ``assign`` criteria. ``for_window`` is reserved
+    for commands that mutate the mapped view, and ``no_focus`` is rendered as its
+    own top-level criteria command because it is not a runtime view command.
     """
 
     if not isinstance(rule, Mapping):
@@ -332,14 +358,13 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
     if unknown:
         raise RuleRenderError(f"unsupported window effect: {sorted(unknown)[0]}")
 
-    assignment: str | None = None
-    destination_move: str | None = None
+    statements: list[str] = []
     if "workspace" in destination:
         target = _workspace_destination(destination["workspace"])
-        assignment = f"assign {criteria} workspace {target}"
-        destination_move = f"move container to workspace {target}"
+        statements.append(f"assign {criteria} workspace {target}")
     elif "output" in destination:
-        destination_move = "move container to output " + _rule_quote(destination["output"], "destination output")
+        target = _rule_quote(destination["output"], "destination output")
+        statements.append(f"assign {criteria} output {target}")
 
     commands: list[str] = []
     for name, command in (("floating", "floating"), ("fullscreen", "fullscreen"), ("sticky", "sticky")):
@@ -351,11 +376,8 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
         commands.append(f"resize set height {_rule_positive_int(effects['height_px'], 'height_px')} px")
     if "center" in effects and _rule_bool(effects["center"], "center"):
         commands.append("move position center")
-    if destination_move is not None:
-        # Re-assert the destination after any centering so the placement survives.
-        commands.append(destination_move)
     if "no_focus" in effects and _rule_bool(effects["no_focus"], "no_focus"):
-        commands.append("no_focus")
+        statements.append(f"no_focus {criteria}")
     if "border" in effects:
         commands.append(_render_border(effects["border"]))
     if "opacity" in effects:
@@ -363,10 +385,11 @@ def render_window_rule(rule: Mapping[str, Any]) -> str:
         if isinstance(opacity, bool) or not isinstance(opacity, (int, float)) or not math.isfinite(opacity) or not 0 <= opacity <= 1:
             raise RuleRenderError("opacity must be a finite number from 0 through 1")
         commands.append(f"opacity {opacity:g}")
-    if not commands:
+    if commands:
+        statements.append("for_window " + criteria + " " + ", ".join(commands))
+    if not statements:
         raise RuleRenderError("window rule requires at least one effect or destination")
-    statement = "for_window " + criteria + " " + ", ".join(commands)
-    return statement if assignment is None else assignment + "\n" + statement
+    return "\n".join(statements)
 
 
 def render_workspace_output_rule(rule: Mapping[str, Any]) -> str:
@@ -466,7 +489,8 @@ def resolve_managed_config_dir(config_dir: str | Path | None) -> tuple[Path, Pat
     the documented XDG default: includes under
     ``${XDG_CONFIG_HOME:-~/.config}/sway/hermes`` and the main configuration at
     ``${XDG_CONFIG_HOME:-~/.config}/sway/config``.  The plugin never edits that
-    main configuration; it only reads it and requires the exact include line.
+    main configuration; it only reads it and recognizes safe literal paths, ``~``,
+    relative paths, and filesystem globs that resolve to its managed include.
     """
 
     if config_dir in (None, ""):
@@ -558,13 +582,14 @@ class ManagedRuleStore:
     def __init__(self, config_dir: str | Path) -> None:
         self.paths = managed_rule_paths(config_dir)
 
-    def list(self) -> list[dict[str, Any]]:
+    def _load(self) -> tuple[list[dict[str, Any]], FileRevision]:
         include = self.paths.include
-        if not include.exists():
-            return []
         try:
-            parsed = parse_managed_config(include.read_text(encoding="utf-8"))
-        except OSError as exc:
+            raw, revision = _read_file_with_revision(include)
+            if raw is None:
+                return [], revision
+            parsed = parse_managed_config(raw.decode("utf-8"))
+        except (OSError, UnicodeError) as exc:
             raise ConfigFormatError(f"cannot read managed rule include: {exc}") from exc
         metadata = parsed.metadata
         if set(metadata) != {"format", "resource", "rules"} or metadata.get("format") != _RULE_FORMAT or metadata.get("resource") != "sway_rule":
@@ -576,7 +601,10 @@ class ManagedRuleStore:
         expected = parse_managed_config(rendered)
         if expected.body != parsed.body:
             raise ManualEditRefused("manual edit refused: managed rules do not match metadata")
-        return [_copy_json(rule) for rule in expected.metadata["rules"]]
+        return [_copy_json(rule) for rule in expected.metadata["rules"]], revision
+
+    def list(self) -> list[dict[str, Any]]:
+        return self._load()[0]
 
     def get(self, rule_id: object) -> dict[str, Any]:
         selected = _rule_id(rule_id)
@@ -596,6 +624,7 @@ class ManagedRuleStore:
         atomic_replace_fn: Callable[..., AtomicWrite] | None = None,
         backup_count: int = 3,
         sway_binary: str = "sway",
+        expected_current: FileRevision | None = None,
     ) -> AtomicWrite:
         if isinstance(backup_count, bool) or not isinstance(backup_count, int) or backup_count < 0:
             raise AtomicWriteError("backup_keep must be a non-negative integer")
@@ -611,6 +640,7 @@ class ManagedRuleStore:
             atomic_replace_fn=atomic_replace_fn,
             backup_count=backup_count,
             sway_binary=sway_binary,
+            expected_current=expected_current,
         )
 
     def _conflicts(self, new_rule: Mapping[str, Any]) -> tuple[IncludeConflict, ...]:
@@ -629,24 +659,36 @@ class ManagedRuleStore:
 
     def add(self, rule: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
         created = normalize_managed_rule(rule)
-        existing = self.list()
+        existing, revision = self._load()
         if any(entry["rule_id"] == created["rule_id"] for entry in existing):
             raise ConfigFormatError(f"managed rule already exists: {created['rule_id']}")
-        self.write(existing + [created], **write_kwargs)
+        self.write(existing + [created], expected_current=revision, **write_kwargs)
         return created
 
     def update(self, rule_id: object, rule: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
         selected = _rule_id(rule_id)
         updated = normalize_managed_rule({**dict(rule), "rule_id": selected}, allow_generated_id=False)
-        existing = self.list()
+        existing, revision = self._load()
         if not any(entry["rule_id"] == selected for entry in existing):
             raise ConfigFormatError(f"managed rule not found: {selected}")
-        self.write([updated if entry["rule_id"] == selected else entry for entry in existing], **write_kwargs)
+        self.write(
+            [updated if entry["rule_id"] == selected else entry for entry in existing],
+            expected_current=revision,
+            **write_kwargs,
+        )
         return updated
 
     def remove(self, rule_id: object, **write_kwargs: Any) -> dict[str, Any]:
-        removed = self.get(rule_id)
-        self.write([entry for entry in self.list() if entry["rule_id"] != removed["rule_id"]], **write_kwargs)
+        selected = _rule_id(rule_id)
+        existing, revision = self._load()
+        removed = next((entry for entry in existing if entry["rule_id"] == selected), None)
+        if removed is None:
+            raise ConfigFormatError(f"managed rule not found: {selected}")
+        self.write(
+            [entry for entry in existing if entry["rule_id"] != selected],
+            expected_current=revision,
+            **write_kwargs,
+        )
         return removed
 
 
@@ -741,13 +783,14 @@ class ManagedStartupStore:
     def __init__(self, config_dir: str | Path) -> None:
         self.paths = managed_startup_paths(config_dir)
 
-    def list(self) -> list[dict[str, Any]]:
+    def _load(self) -> tuple[list[dict[str, Any]], FileRevision]:
         include = self.paths.include
-        if not include.exists():
-            return []
         try:
-            parsed = parse_managed_config(include.read_text(encoding="utf-8"))
-        except OSError as exc:
+            raw, revision = _read_file_with_revision(include)
+            if raw is None:
+                return [], revision
+            parsed = parse_managed_config(raw.decode("utf-8"))
+        except (OSError, UnicodeError) as exc:
             raise ConfigFormatError(f"cannot read managed startup include: {exc}") from exc
         metadata = parsed.metadata
         if (
@@ -762,7 +805,10 @@ class ManagedStartupStore:
         expected = parse_managed_config(render_managed_startup(entries))
         if expected.body != parsed.body:
             raise ManualEditRefused("manual edit refused: managed startup entries do not match metadata")
-        return [_copy_json(entry) for entry in expected.metadata["entries"]]
+        return [_copy_json(entry) for entry in expected.metadata["entries"]], revision
+
+    def list(self) -> list[dict[str, Any]]:
+        return self._load()[0]
 
     def get(self, entry_id: object) -> dict[str, Any]:
         selected = _startup_entry_id(entry_id)
@@ -779,6 +825,7 @@ class ManagedStartupStore:
         atomic_replace_fn: Callable[..., AtomicWrite] | None = None,
         backup_count: int = 3,
         sway_binary: str = "sway",
+        expected_current: FileRevision | None = None,
     ) -> AtomicWrite:
         return write_managed_include(
             self.paths.include,
@@ -788,11 +835,12 @@ class ManagedStartupStore:
             atomic_replace_fn=atomic_replace_fn,
             backup_count=backup_count,
             sway_binary=sway_binary,
+            expected_current=expected_current,
         )
 
     def add(self, entry: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
         created = normalize_managed_startup(entry)
-        existing = self.list()
+        existing, revision = self._load()
         if any(item["entry_id"] == created["entry_id"] for item in existing):
             raise ConfigFormatError(f"managed startup entry already exists: {created['entry_id']}")
         duplicate = _duplicate_startup(existing, created)
@@ -800,13 +848,13 @@ class ManagedStartupStore:
             raise DuplicateStartupEntry(
                 f"an entry already starts the same command with run_on {created['run_on']}: {duplicate['entry_id']}"
             )
-        self.write(existing + [created], **write_kwargs)
+        self.write(existing + [created], expected_current=revision, **write_kwargs)
         return created
 
     def update(self, entry_id: object, entry: Mapping[str, Any], **write_kwargs: Any) -> dict[str, Any]:
         selected = _startup_entry_id(entry_id)
         updated = normalize_managed_startup({**dict(entry), "entry_id": selected}, allow_generated_id=False)
-        existing = self.list()
+        existing, revision = self._load()
         if not any(item["entry_id"] == selected for item in existing):
             raise ConfigFormatError(f"managed startup entry not found: {selected}")
         remaining = [item for item in existing if item["entry_id"] != selected]
@@ -815,12 +863,20 @@ class ManagedStartupStore:
             raise DuplicateStartupEntry(
                 f"an entry already starts the same command with run_on {updated['run_on']}: {duplicate['entry_id']}"
             )
-        self.write([updated, *remaining], **write_kwargs)
+        self.write([updated, *remaining], expected_current=revision, **write_kwargs)
         return updated
 
     def remove(self, entry_id: object, **write_kwargs: Any) -> dict[str, Any]:
-        removed = self.get(entry_id)
-        self.write([item for item in self.list() if item["entry_id"] != removed["entry_id"]], **write_kwargs)
+        selected = _startup_entry_id(entry_id)
+        existing, revision = self._load()
+        removed = next((entry for entry in existing if entry["entry_id"] == selected), None)
+        if removed is None:
+            raise ConfigFormatError(f"managed startup entry not found: {selected}")
+        self.write(
+            [item for item in existing if item["entry_id"] != selected],
+            expected_current=revision,
+            **write_kwargs,
+        )
         return removed
 
 
@@ -849,6 +905,7 @@ def write_managed_include(
     atomic_replace_fn: Callable[..., AtomicWrite] | None = None,
     backup_count: int = 3,
     sway_binary: str = "sway",
+    expected_current: FileRevision | None = None,
 ) -> AtomicWrite:
     """Validate a rendered include beside the main config, then replace it atomically."""
 
@@ -868,13 +925,18 @@ def write_managed_include(
             os.fsync(handle.fileno())
         validate_candidate_and_main(candidate, main_config, subprocess_run, sway_binary=sway_binary)
         writer = atomic_replace if atomic_replace_fn is None else atomic_replace_fn
-        return writer(include, content, backup_count=backup_count)
+        return writer(
+            include,
+            content,
+            backup_count=backup_count,
+            expected_current=expected_current,
+        )
     finally:
         if candidate is not None:
             candidate.unlink(missing_ok=True)
 
 
-def _owned_include_match(directory: Path, target: str, owned_paths: set[Path]) -> bool:
+def include_target_matches_owned(directory: Path, target: str, owned_paths: set[Path]) -> bool:
     """True when an include target names one of the plugin-owned files.
 
     Both the documented glob (``~/.config/sway/hermes/*.conf``) and an explicit
@@ -887,7 +949,15 @@ def _owned_include_match(directory: Path, target: str, owned_paths: set[Path]) -
         pattern = Path(expanded)
         if not pattern.is_absolute():
             pattern = directory / expanded
-        return any(fnmatch.fnmatch(str(candidate), str(pattern)) for candidate in owned_paths)
+        pattern_parts = pattern.parts
+        return any(
+            len(candidate.parts) == len(pattern_parts)
+            and all(
+                fnmatch.fnmatchcase(candidate_part, pattern_part)
+                for candidate_part, pattern_part in zip(candidate.parts, pattern_parts)
+            )
+            for candidate in owned_paths
+        )
     candidate = Path(expanded)
     if not candidate.is_absolute():
         candidate = directory / expanded
@@ -937,7 +1007,7 @@ def scan_include_conflicts(
             if not lowered.startswith("include "):
                 continue
             target = statement[8:].strip()
-            if target and _owned_include_match(path.parent, target, owned_paths):
+            if target and include_target_matches_owned(path.parent, target, owned_paths):
                 continue
             if not target or target.startswith("/") or any(token in target for token in ("$", "~", "*", "?", "[", "]")):
                 found.append(IncludeConflict("unscannable_include", path, number, raw))
@@ -978,43 +1048,121 @@ def validate_candidate_and_main(candidate: str | Path, main_config: str | Path, 
     )
 
 
-def atomic_replace(path: str | Path, content: str, *, backup_count: int = 3) -> AtomicWrite:
-    """Lock, stage beside, back up, and atomically replace a managed include."""
+def _read_file_with_revision(path: Path) -> tuple[bytes | None, FileRevision]:
+    """Read one regular pathname and bind the bytes to its inode identity."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None, FileRevision(False)
+    try:
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise OSError(f"not a regular file: {path}")
+        with os.fdopen(file_fd, "rb") as handle:
+            file_fd = -1
+            content = handle.read()
+        path_stat = os.stat(path, follow_symlinks=False)
+        if path_stat.st_dev != file_stat.st_dev or path_stat.st_ino != file_stat.st_ino:
+            raise OSError(f"file changed while it was read: {path}")
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+    return content, FileRevision(
+        True,
+        file_stat.st_dev,
+        file_stat.st_ino,
+        stat.S_IMODE(file_stat.st_mode),
+        hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _secure_backup_copy(content: bytes, mode: int, destination: Path) -> None:
+    """Copy captured bytes through an owned inode before replacing a named backup."""
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=destination.parent, prefix=destination.name + ".tmp.", delete=False
+        ) as temporary_handle:
+            temporary = Path(temporary_handle.name)
+            temporary_handle.write(content)
+            os.fchmod(temporary_handle.fileno(), mode)
+            temporary_handle.flush()
+            os.fsync(temporary_handle.fileno())
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def atomic_replace(
+    path: str | Path,
+    content: str,
+    *,
+    backup_count: int = 3,
+    expected_current: FileRevision | None = None,
+) -> AtomicWrite:
+    """CAS, stage, back up, and atomically replace a managed include."""
 
     target = Path(path)
     if not isinstance(content, str) or "\x00" in content:
         raise AtomicWriteError("replacement content must be text without NUL")
     if backup_count < 0:
         raise AtomicWriteError("backup_count cannot be negative")
+    if expected_current is not None and not isinstance(expected_current, FileRevision):
+        raise AtomicWriteError("expected_current must be a file revision")
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.with_name(target.name + ".lock")
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     candidate: Path | None = None
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            prior_bytes, current_revision = _read_file_with_revision(target)
+        except OSError as exc:
+            raise AtomicWriteError(f"cannot read atomic write target {target}: {exc}") from exc
+        if expected_current is not None and current_revision != expected_current:
+            raise AtomicWriteError(f"atomic write target changed since it was read: {target}")
+        prior_mode = current_revision.mode
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, prefix=target.name + ".candidate.", delete=False) as handle:
             candidate = Path(handle.name)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        candidate_stat = candidate.stat(follow_symlinks=False)
         backup: Path | None = None
-        if target.exists() and backup_count:
-            oldest = target.with_name(target.name + f".bak.{backup_count}")
-            oldest.unlink(missing_ok=True)
-            for number in range(backup_count - 1, 0, -1):
-                source = target.with_name(target.name + f".bak.{number}")
-                if source.exists():
-                    os.replace(source, target.with_name(target.name + f".bak.{number + 1}"))
-            backup = target.with_name(target.name + ".bak.1")
-            os.replace(target, backup)
+        if prior_bytes is not None:
+            if prior_mode is None:
+                raise AtomicWriteError(f"atomic write target has no captured mode: {target}")
+            if backup_count:
+                for number in range(backup_count - 1, 0, -1):
+                    source = target.with_name(target.name + f".bak.{number}")
+                    if source.exists():
+                        os.replace(source, target.with_name(target.name + f".bak.{number + 1}"))
+                backup = target.with_name(target.name + ".bak.1")
+                _secure_backup_copy(prior_bytes, prior_mode, backup)
         os.replace(candidate, target)
         candidate = None
+        target_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-        return AtomicWrite(target, target.parent / (target.name + ".candidate.committed"), backup)
+        return AtomicWrite(
+            target,
+            target.parent / (target.name + ".candidate.committed"),
+            backup,
+            prior_bytes,
+            prior_mode,
+            hashlib.sha256(prior_bytes).hexdigest() if prior_bytes is not None else None,
+            candidate_stat.st_dev,
+            candidate_stat.st_ino,
+            target_digest,
+        )
     except OSError as exc:
         raise AtomicWriteError(f"atomic write failed for {target}: {exc}") from exc
     finally:
@@ -1022,6 +1170,72 @@ def atomic_replace(path: str | Path, content: str, *, backup_count: int = 3) -> 
             candidate.unlink(missing_ok=True)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+def restore_atomic_write(write: AtomicWrite) -> None:
+    """Restore the exact file state that preceded an atomic managed write."""
+
+    target = write.target
+    lock_path = target.with_name(target.name + ".lock")
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise AtomicWriteError(f"cannot lock rollback target {target}: {exc}") from exc
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            _current_bytes, current_revision = _read_file_with_revision(target)
+        except OSError as exc:
+            raise AtomicWriteError(f"cannot verify rollback target {target}: {exc}") from exc
+        if (
+            write.target_device is None
+            or write.target_inode is None
+            or write.target_digest is None
+            or not current_revision.exists
+            or current_revision.device != write.target_device
+            or current_revision.inode != write.target_inode
+            or current_revision.digest != write.target_digest
+        ):
+            raise AtomicWriteError(f"rollback target changed since atomic write: {target}")
+        try:
+            if write.prior_bytes is None:
+                target.unlink()
+            else:
+                if (
+                    write.prior_mode is None
+                    or write.prior_digest is None
+                    or hashlib.sha256(write.prior_bytes).hexdigest() != write.prior_digest
+                ):
+                    raise AtomicWriteError(f"rollback snapshot changed since atomic write: {target}")
+                restored: Path | None = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        "wb", dir=target.parent, prefix=target.name + ".restore.", delete=False
+                    ) as restored_handle:
+                        restored = Path(restored_handle.name)
+                        restored_handle.write(write.prior_bytes)
+                        os.fchmod(restored_handle.fileno(), write.prior_mode)
+                        restored_handle.flush()
+                        os.fsync(restored_handle.fileno())
+                    os.replace(restored, target)
+                    restored = None
+                finally:
+                    if restored is not None:
+                        restored.unlink(missing_ok=True)
+            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            raise AtomicWriteError(f"cannot restore rollback snapshot for {target}: {exc}") from exc
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def discard_atomic_write(write: AtomicWrite) -> None:
+    """Accept an in-memory rollback snapshot; no filesystem cleanup is needed."""
 
 
 def _reload_and_wait(client: Any, timeout: float) -> None:

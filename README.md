@@ -1,272 +1,295 @@
 # hermes-sway-plugin
 
 A native [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin for
-**Sway 1.9**: bounded desktop inspection, verified runtime control, best-effort
-application launching, and plugin-owned persistent configuration that keeps
-working when Hermes is not running.
+**Sway 1.9**. It gives Hermes typed tools for inspecting and controlling the
+current desktop, launching applications, and maintaining plugin-owned Sway rules
+and startup entries.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Sway](https://img.shields.io/badge/sway-1.9-informational)
 
-Standard library only — no runtime dependencies. Linux/Wayland only.
-
-## Supported versions and scope
-
-| | |
-|---|---|
-| Sway | **1.9** (enforced). Any other major/minor fails closed with `unsupported_sway_version`. |
-| Python | 3.10 or newer |
-| Hermes | current native plugin API (`plugin.yaml` v1-compatible manifest, `ctx.register_tool`, `ctx.register_skill`) |
-| Platforms | Linux/Wayland |
-
-The plugin targets Sway 1.9 deliberately: it renders only commands and
-configuration statements that Sway 1.9 implements, and it refuses to
-opportunistically use newer syntax. It is not an i3 plugin, and it is not a
-generic `swaymsg` passthrough — there is no raw-command parameter anywhere.
+The runtime uses only the Python standard library. The plugin is for
+Linux/Wayland and supports Sway 1.9 only.
 
 ## Installation
 
 ```bash
-# From GitHub (recommended)
+# Install and enable from GitHub
 hermes plugins install lessucettes/hermes-sway-plugin --enable
 
-# Or validate a local checkout first
+# Or inspect and validate a checkout before installing a pinned revision
 git clone https://github.com/lessucettes/hermes-sway-plugin
 cd hermes-sway-plugin
 hermes plugins validate .
 hermes plugins doctor . --ci
-hermes plugins install lessucettes/hermes-sway-plugin --ref <commit-sha> --no-enable
+hermes plugins install lessucettes/hermes-sway-plugin --ref <40-character-commit-sha> --no-enable
 hermes plugins enable sway
 ```
 
-Then confirm the toolset is available:
+Confirm registration with:
 
 ```bash
 hermes plugins list
 hermes tools
 ```
 
-The plugin registers the `sway` toolset (seven tools) and the bundled
-`sway:sway` skill. Load the skill in a session with `skill_view("sway:sway")`;
-it is not auto-loaded.
+The plugin registers the `sway` toolset with seven tools and the optional
+`sway:sway` skill. Load the skill with `skill_view("sway:sway")` when you want
+its Sway-specific operating guidance; the skill is not auto-loaded.
+
+## Use it through Hermes
+
+Ask for the desktop outcome in ordinary language. Hermes can select the tool and
+arguments from the request, for example:
+
+- “Move Firefox to workspace 3.”
+- “Make the focused terminal floating, resize it to 1000 by 700, and center it.”
+- “Put Telegram on workspace 4 whenever it opens.”
+- “Start kanshi when Sway starts, but not after every reload.”
+- “Launch foot and tell me whether a new window can be correlated with it.”
+- “Show me the current Sway workspaces and outputs.”
+
+An inspection is useful when the requested window is ambiguous or when a fresh
+container ID is needed. It is not a mandatory first step when an exact target is
+already known. Persistent window rules affect future matching windows; if a
+request also means “change the already-open window now,” Hermes must use a
+runtime window action as well.
 
 ## Tools
 
 | Tool | Scope | Purpose |
 |---|---|---|
-| `sway_inspect` | read-only | Sway version, focused window/workspace/output, windows, workspaces, outputs, marks, or a compact normalized tree. |
-| `sway_window` | runtime | Focus, move to an exact workspace/output, directional move, float/fullscreen, resize, position, scratchpad, sticky, marks, and a guarded close. |
-| `sway_workspace` | runtime | Focus or create, rename, or move an existing workspace to an exact output. |
-| `sway_layout` | runtime | Set a container's parent layout, split at a container, or exactly swap two containers. |
-| `sway_launch` | runtime | Launch one argv process without a shell and report best-effort window correlation. |
-| `sway_rule` | persistent | Managed window and workspace-to-output rules in Sway configuration. |
-| `sway_startup` | persistent | Managed `exec` / explicitly acknowledged `exec_always` startup entries. |
+| `sway_inspect` | read-only | Return Sway version and focused state, or bounded views of windows, workspaces, outputs, marks, and the normalized tree. The default view is a compact summary. |
+| `sway_window` | runtime | Focus or move one window; change floating, fullscreen, scratchpad, sticky, marks, size, or position; request that Sway close it. |
+| `sway_workspace` | runtime | Focus or create an exact workspace, rename one, or move one to an exact output. |
+| `sway_layout` | runtime | Set the selected container's parent layout, split at a container, or swap two containers. |
+| `sway_launch` | runtime | Start one argv-based process without a shell and optionally observe possible new windows. |
+| `sway_rule` | persistent | Manage plugin-owned window rules and workspace-to-output declarations. |
+| `sway_startup` | persistent | Manage plugin-owned `exec` and explicitly acknowledged `exec_always` entries. |
 
-Every handler returns exactly one JSON string:
+There is no raw Sway command argument. Every handler returns one JSON string in
+a stable success or error envelope:
 
 ```json
-{"ok": true, "scope": "runtime", "data": { }, "warnings": []}
+{"ok": true, "scope": "runtime", "data": {}, "warnings": []}
 {"ok": false, "error": {"code": "target_not_found", "message": "…", "details": {}}, "recoverable": true}
 ```
 
-### Working style
+### Runtime behavior
 
-1. Inspect first, then mutate a **fresh** `con_id` from that inspection.
-2. A singular mutation must resolve to **exactly one** target; zero or multiple
-   matches are an error, never a first-match guess.
-3. Every runtime mutation is verified against a freshly fetched tree, and the
-   observed result is reported. Sway command batches are not transactional, so
-   the plugin sends the smallest possible command instead of pretending to roll
-   back.
-4. Runtime changes are session state. Use `sway_rule` / `sway_startup` for
-   behavior that must survive a restart.
+- Singular window and layout operations resolve exactly one target by `con_id`,
+  mark, or conjunctive exact fields. Zero or multiple matches are errors rather
+  than first-match guesses. A `con_id` is session-local and should be recent.
+- Exact workspace focus and move operations use Sway's
+  `--no-auto-back-and-forth`, so requesting a named workspace does not toggle to
+  the previous workspace.
+- Runtime operations query fresh state after the command when there is an
+  observable postcondition. Sway command batches are not transactional.
+- `set_parent_layout` selects the requested container because Sway's `layout`
+  command changes that selected container's parent layout.
+- Floating-window coordinates support workspace-relative and global absolute
+  positioning. Resize returns both the requested size and the rectangle Sway
+  actually reports; compositor constraints can change the observed geometry.
+- `close` requires `confirm_close: true` and sends Sway's `kill` command. The
+  result distinguishes `close_requested` from `closed_observed`; it does not
+  infer which process signal or client-side shutdown behavior occurred.
+- Directional movement, centering, splitting, and automatic container
+  flattening remain Sway-controlled. Results and warnings describe what the
+  plugin can observe rather than promising a complete topology.
 
 ## Persistent configuration
 
-Persistent tools write **only** plugin-owned files and never edit your Sway
-configuration for you.
+Persistent tools write only these plugin-owned files:
 
-Add the owned include to your Sway configuration once:
+| File | Contents |
+|---|---|
+| `hermes-sway-plugin-rules.conf` | Window rules and workspace-to-output declarations |
+| `hermes-sway-plugin-startup.conf` | Startup commands |
+
+The plugin **does not edit the main Sway config**. Add the include yourself once:
 
 ```sway
 include ~/.config/sway/hermes/*.conf
 ```
 
-| File | Contents |
-|---|---|
-| `hermes-sway-plugin-rules.conf` | Window and workspace-to-output rules |
-| `hermes-sway-plugin-startup.conf` | Startup commands |
+The documented glob is recognized when deciding whether the active config loads
+the managed file. An explicit matching include, including a relative or `~`
+path, is also recognized.
 
-Default location: `${XDG_CONFIG_HOME:-~/.config}/sway/hermes` with the main
-configuration at `${XDG_CONFIG_HOME:-~/.config}/sway/config`. Set the plugin's
-`config_dir` to manage a different configuration directory. Every persistent
-result returns the resolved `include` path, so the location is never implicit.
+By default, managed files live in
+`${XDG_CONFIG_HOME:-~/.config}/sway/hermes`, while the main configuration is
+`${XDG_CONFIG_HOME:-~/.config}/sway/config`. If `config_dir` is set, it must be
+an absolute Sway configuration directory; managed files and its `config` file
+are resolved there. Persistent results report the resolved include path.
 
 ```bash
 chmod 700 ~/.config/sway/hermes   # recommended; generated files are mode 0600
 ```
 
-### Ownership boundaries and safety
+### What a persistent write does
 
-- Each generated file carries deterministic metadata headers and a SHA-256
-  digest of its body. Hand edits are **refused** (`manual_edit_refused`) instead
-  of being silently absorbed or overwritten.
-- Writes are serialized with `flock`, staged in the same directory, validated
-  with `sway -C -c`, and only then replaced atomically. A timestamped backup is
-  kept (`backup_keep`, default 10).
-- Reload happens only when the running configuration contains the exact include
-  line. Otherwise the validated write succeeds with an `include_not_configured`
-  warning and no reload. Pending reload confirmation restores the backup; that
-  rollback is **configuration rollback only** and cannot terminate a process
-  that `exec_always` already started.
-- Overlapping external `assign` / `for_window` / `workspace … output` statements
-  are detected conservatively and block writes unless explicitly acknowledged
-  with `allow_external_conflicts`. The plugin never edits or reorders your rules.
-- New persistent rules apply to **new windows only**; they are not retroactive.
+- Managed documents contain canonical metadata and a SHA-256 digest of the Sway
+  body. If their content is edited by hand, later management is refused with
+  `manual_edit_refused`.
+- Writes are serialized with `flock`. A candidate in the same directory and the
+  current main config are checked with `sway -C -c` before replacement.
+- Existing files are copied to numeric backups (`.bak.1`, `.bak.2`, …), up to
+  `backup_keep`. The live target remains in place while the backup is made; the
+  candidate then replaces it with `os.replace`.
+- Reload is attempted only when the running configuration can be observed and
+  contains an include that resolves to the managed file. Otherwise the write
+  remains on disk and returns `include_not_configured` or
+  `reload_not_attempted`.
+- If a requested reload is not confirmed, the previous file is restored (or a
+  newly created file is removed) and that state is reloaded. This is file/config
+  rollback only; it cannot undo effects that Sway or an `exec_always` process
+  already performed.
+- A conservative scan reports external `assign`, `for_window`, workspace-output,
+  unreadable, or unscannable include statements. These findings are warnings;
+  they do not block a valid write, and the plugin does not edit or reorder those
+  statements.
 
-Manual recovery:
+Manual recovery from the newest retained backup is straightforward:
 
 ```bash
 cp ~/.config/sway/hermes/hermes-sway-plugin-rules.conf.bak.1 \
-   ~/.config/sway/hermes/hermes-sway-plugin-rules.conf && swaymsg reload
+   ~/.config/sway/hermes/hermes-sway-plugin-rules.conf
+swaymsg reload
 ```
 
-### Generated statements
+### Rule semantics
 
-Rule rendering is deliberately conservative, and the exact forms are verified in
-disposable Sway 1.9 sessions:
+- Window placement to either a workspace or an output is rendered with Sway's
+  `assign`. Other mapped-window effects use `for_window`; `no_focus` is emitted
+  as its own top-level statement.
+- A window rule can match `app_id`, XWayland `class`/`instance`, `title`,
+  `window_role`, `shell`, or `con_mark` with exact or regex criteria.
+  `window_type` is a literal Sway 1.9 enum and does not accept regex mode.
+- `intended_cardinality` is advisory and defaults to `many`. When a live tree is
+  available, the result includes the current audit and warns if it does not meet
+  the stated intent; the audit does not prevent the rule from being written.
+- Window rules are not retroactively applied to unchanged existing windows.
+  `workspace_output` is a separate workspace declaration, not a window rule.
+- A workspace-output rule renders one `workspace "…" output "…" …` statement;
+  its output list is preference order.
+- Normal startup entries render as `exec` (`sway_start_only`).
+  `sway_start_and_every_reload` renders as `exec_always` and requires
+  `acknowledge_reload_relaunch: true` because every reload may start another
+  process.
 
-- a workspace destination renders as `assign [criteria] workspace number N`
-  (named workspaces stay quoted), because `for_window ... move container to
-  workspace` regularly leaves the window on the focused workspace;
-- centering a floating container re-parents it to the focused workspace, so when
-  a destination and `center` are both requested the destination move is re-issued
-  as the last statement of the rule body;
-- an output destination renders as `for_window ... move container to output`;
-- `workspace_output` resources aggregate into one `workspace ... output ...` line
-  with outputs in priority order.
+For future one-window placement, prefer a stable Wayland `app_id`. For XWayland,
+use a stable class and instance. Two otherwise identical windows cannot be
+reliably separated by a Sway rule; configure distinct application identities
+first, such as `kitty --app-id kitty.chat` and `kitty --app-id kitty.build`.
 
-### Example: place a chat client
+## Launch correlation
 
-```jsonc
-// sway_rule add
-{
-  "action": "add",
-  "rule_id": "telegram",
-  "kind": "window",
-  "match": {"app_id": {"value": "org.telegram.desktop", "mode": "exact"}},
-  "intended_cardinality": "one",
-  "destination": {"workspace": "4"},
-  "effects": {"floating": true, "width_px": 800, "height_px": 600, "center": true}
-}
-```
+`sway_launch` starts exactly one argv process with `shell=False`. When window
+observation is requested, it subscribes before launch, compares new containers
+to a baseline, waits 250 ms after a tentative match for competing candidates,
+and performs a final tree query at the deadline.
 
-Two otherwise identical windows cannot be separated by Sway rules. Give each
-application a stable identity first (for example `kitty --app-id kitty.chat` and
-`kitty --app-id kitty.build`, or distinct XWayland `--class` values) and match
-that exact value.
+Correlation reports one of:
+
+- `matched` — one strongest candidate;
+- `ambiguous` — more than one strongest candidate;
+- `timeout` — no candidate met the available evidence;
+- `observation_failed` — the process started, but Sway observation failed;
+- `not_requested` — `wait_for_window` was false.
+
+Evidence is ranked as `pid_exact`, `descendant`, then `identity_only`.
+`identity_only` requires an exact caller-supplied identity. All tiers are
+best-effort evidence, not proof of a process-to-window relationship. Spawned
+children are reaped asynchronously when the process object supports waiting.
 
 ## Configuration keys
 
 | Key | Default | Meaning |
-|---|---|---|
-| `ipc_timeout_seconds` | 3.0 | Sway IPC request timeout. |
-| `reload_timeout_seconds` | 5.0 | Wait for a finished reload. |
-| `launch_timeout_seconds` | 10.0 | Window-correlation window after a launch. |
-| `config_dir` | `""` | Managed directory; empty uses the XDG default above. |
-| `backup_keep` | 10 | Backups retained after a successful write. |
+|---|---:|---|
+| `ipc_timeout_seconds` | `3.0` | Sway IPC request timeout. |
+| `reload_timeout_seconds` | `5.0` | Wait for a reload event before rollback. |
+| `launch_timeout_seconds` | `10.0` | Default window-correlation period. |
+| `config_dir` | `""` | Managed Sway directory; empty uses the XDG paths above. |
+| `backup_keep` | `10` | Number of numeric managed-file backups to retain. |
 
-## Limitations
+## Limits and authority
 
-- **Sway 1.9 only.** Other versions are rejected rather than partially
-  supported.
-- **No raw commands** and no arbitrary relative insertion ("place A immediately
-  right of B"), saved-tree restore, placeholder/layout import, or complete
-  historical topology restore. Sway 1.9 does not offer a reliable API for those.
-- **Launch correlation is best-effort.** It reports `matched`, `timeout`, or
-  `ambiguous` plus the evidence used. Process reuse, daemonizing applications,
-  and identical identities remain limitations; a successful process start is
-  never reported as a successful window match.
-- **`sway_window close` terminates the client, not just one view.** Sway's `kill`
-  signals the owning process, so closing one window of a multi-window client
-  (single-instance terminal emulator, IDE, browser) can close its other windows
-  as well. Check that the client owns no other window before closing it.
-- **Persistent geometry is applied at map time.** `width_px` / `height_px`
-  effects are issued by Sway's `for_window`; a window assigned to a workspace
-  that is not visible may keep the size its client requested. Verify the geometry
-  after the workspace is shown rather than assuming the rule won.
-- **Directional moves and centered positions are compositor-dependent.** The
-  observed result is reported, and the plugin tells you to inspect the layout.
-- **Geometry and sticky actions require an explicit floating, non-fullscreen
-  window.** The plugin does not enable floating implicitly to satisfy a request.
-- **No cross-restart container identity.** `con_id` values do not survive a
-  restart; re-inspect.
-- **External conflicts are reported, not resolved.** There is no include
-  ordering that universally wins for both first-match `assign` and later-effect
-  `for_window` rules, so overlap is yours to settle.
+- Sway 1.9 is enforced. Other major/minor versions return
+  `unsupported_sway_version` for live operations.
+- This is not an i3 plugin or a generic `swaymsg` passthrough. It does not offer
+  arbitrary relative insertion, saved-tree import, placeholder restoration, or
+  complete historical topology restore.
+- Runtime window/container identity does not survive a Sway restart.
+- Persistent rule effects, geometry, external statement ordering, application
+  daemonization, and client reuse are ultimately governed by Sway and the
+  application. The plugin reports bounded observations and warnings where it
+  cannot establish stronger facts.
+- Upstream Sway 1.9 source and behavior are the authority for command and config
+  semantics. This README describes the plugin's interface, not an independent
+  guarantee about compositor internals.
 
 ## Testing and validation
 
+Create the development environment and run the suite without contacting the
+active Sway session:
+
 ```bash
-uv venv .venv && uv pip install --python .venv/bin/python -e '.[dev]'
-uv run pytest -q                       # full suite, no compositor required
-hermes plugins validate .
-hermes plugins doctor . --ci
-SWAYSOCK="$SWAYSOCK" uv run python scripts/live_smoke.py
+uv sync --extra dev
+uv run pytest -q
+uv run pytest tests/ -q
 ```
 
-The test suite drives the real i3-ipc framing over a scripted Unix socket, so
-nothing touches your desktop. `tests/test_hermes_discovery.py` loads the plugin
-through the real Hermes discovery path and needs a current checkout:
+The tests use fixtures, injected clients, and scripted Unix sockets. The real
+Hermes discovery test needs a current Hermes checkout (the default lookup is
+`~/.hermes/hermes-agent`):
 
 ```bash
 HERMES_REPO=/path/to/hermes-agent uv run pytest tests/test_hermes_discovery.py -q
 ```
 
-`scripts/live_smoke.py` is the only test that talks to a running compositor. It
-sends `GET_VERSION`, `GET_TREE`, `GET_WORKSPACES`, and `GET_OUTPUTS` only — never
-`RUN_COMMAND` — and prints a bounded summary:
-
-```
-Sway 1.9; outputs=1; workspaces=2; windows=3
-```
-
-Behaviors that cannot be asserted headlessly (real placement after a session
-restart, reload-timeout recovery on a disposable configuration) are described
-under *Limitations* rather than claimed by the automated suite.
-
-To verify behavior against a real compositor without disturbing the running
-session, start a disposable headless Sway with its own socket and runtime
-directory:
+Validate the plugin package with Hermes:
 
 ```bash
-runtime=$(mktemp -d)
-WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=2 \
-  XDG_RUNTIME_DIR="$runtime" SWAYSOCK="$runtime/sway.sock" \
-  sway -c /path/to/disposable/config &
-SWAYSOCK="$runtime/sway.sock" swaymsg -t get_tree
+hermes plugins validate . --json
+hermes plugins doctor . --ci
 ```
 
-This is how rule placement, `exec` versus `exec_always`, and close verification
-were checked without restarting a live desktop.
+An optional read-only check against the current compositor is available:
+
+```bash
+SWAYSOCK="$SWAYSOCK" uv run python scripts/live_smoke.py
+```
+
+`live_smoke.py` sends only `GET_VERSION`, `GET_TREE`, `GET_WORKSPACES`, and
+`GET_OUTPUTS`; it does not send `RUN_COMMAND`.
+
+For destructive integration coverage, run the isolated headless harness. It
+creates a temporary Sway 1.9 session and XWayland test windows, exercises runtime
+mutations, persistent placement, reload, and file rollback, then removes the
+session. It never connects to the active desktop:
+
+```bash
+uv run python tests/integration/headless_sway.py
+```
+
+This optional check requires the `sway` and `xmessage` executables. A missing
+prerequisite exits with status 77 and a JSON skip result.
 
 ## License
 
 [MIT](LICENSE) © 2026 lessucettes.
 
-## Development notes
+## Acknowledgements
 
-This project was developed with AI coding assistance. Implementation, tests, and
-documentation were authored in a human-directed workflow with contributions from
-the following models:
+This project was developed with AI coding assistance in a human-directed
+implementation, test, and documentation workflow. Development tools included:
 
 - GPT-5.6 Sol
 - GPT-5.6 Terra
 - GLM-5.3 Flash
 - DeepSeek V4.1 Flash
 
-These models and their providers are credited as development tools only. They do
-not own, endorse, sponsor, or maintain this project, and they provide no warranty
-or support for it. All design decisions, review, and responsibility for the
-published code rest with the repository maintainer.
+These models and their providers do not own, endorse, sponsor, or maintain the
+project and provide no warranty or support. Design decisions, review, and
+responsibility for the published code remain with the repository maintainer.

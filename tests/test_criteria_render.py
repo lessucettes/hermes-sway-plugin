@@ -28,6 +28,12 @@ def test_regex_criteria_are_unanchored_but_sway_quoted():
     )
 
 
+def test_window_type_uses_sways_literal_enum_syntax():
+    assert render_criteria({"window_type": {"value": "dialog"}}) == '[window_type="dialog"]'
+    with pytest.raises(CriteriaError, match="window_type.*regex"):
+        render_criteria({"window_type": {"value": "dialog|utility", "mode": "regex"}})
+
+
 def test_criteria_rejects_unknown_keys_and_unsafe_line_breaks():
     with pytest.raises(CriteriaError, match="unsupported"):
         render_criteria({"workspace": {"value": "1"}})

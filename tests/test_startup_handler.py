@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hermes_sway_plugin import handlers
+import pytest
+
+from hermes_sway_plugin import handlers, persistent
 
 
 def _settings(config_dir: Path):
@@ -177,6 +179,16 @@ def test_startup_add_rejects_a_duplicate_normalized_command(tmp_path):
     assert [entry["startup_id"] for entry in listed["data"]["entries"]] == ["first"]
 
 
+def test_missing_startup_entry_uses_startup_specific_error_code(tmp_path):
+    config_dir = _configured(tmp_path)
+    bound = handlers.build_handlers(_settings(config_dir), ipc_factory=_offline, subprocess_run=_runner([]))
+
+    result = json.loads(bound["sway_startup"]({"action": "get", "startup_id": "missing"}))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "startup_not_found"
+
+
 def test_startup_update_and_remove_keep_the_managed_include_deterministic(tmp_path):
     config_dir = _configured(tmp_path)
     calls = []
@@ -198,6 +210,7 @@ def test_startup_update_and_remove_keep_the_managed_include_deterministic(tmp_pa
 
     assert updated["data"]["entry"]["argv"] == ["waybar", "--log-level", "warning"]
     assert removed["data"]["entry"]["startup_id"] == "panel"
+    assert "runs_on_sway_start_only" not in removed["warnings"]
     assert listed["data"]["entries"] == []
     assert "exec_always" not in (config_dir / "hermes-sway-plugin-startup.conf").read_text(encoding="utf-8")
 
@@ -212,3 +225,36 @@ def test_startup_write_refuses_an_empty_argv_array(tmp_path):
 
     assert result["ok"] is False
     assert result["error"]["code"] == "invalid_argument"
+
+
+def test_startup_store_rejects_a_stale_read_modify_write(tmp_path):
+    config_dir = _configured(tmp_path)
+    store = persistent.ManagedStartupStore(config_dir)
+    runner = _runner([])
+    competing_entry = {
+        "entry_id": "competing",
+        "argv": ["waybar"],
+        "run_on": "sway_start_only",
+    }
+    injected = False
+
+    def interleaving_writer(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            store.add(competing_entry, subprocess_run=runner, backup_count=0)
+        return persistent.atomic_replace(*args, **kwargs)
+
+    with pytest.raises(persistent.AtomicWriteError, match="changed since it was read"):
+        store.add(
+            {
+                "entry_id": "stale",
+                "argv": ["mako"],
+                "run_on": "sway_start_only",
+            },
+            subprocess_run=runner,
+            atomic_replace_fn=interleaving_writer,
+            backup_count=0,
+        )
+
+    assert [entry["entry_id"] for entry in store.list()] == ["competing"]

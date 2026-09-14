@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -37,6 +38,13 @@ def _validated_cwd(cwd: object) -> str | None:
     return cwd
 
 
+def _reap_process(process: Any) -> None:
+    try:
+        process.wait()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def launch_process(
     argv: object,
     cwd: object = None,
@@ -65,6 +73,8 @@ def launch_process(
     pid = getattr(process, "pid", None)
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise SwayPluginError("launch_failed", "process factory returned no valid PID")
+    if callable(getattr(process, "wait", None)):
+        threading.Thread(target=_reap_process, args=(process,), daemon=True).start()
     return {"pid": pid, "started": True}
 
 
@@ -129,7 +139,7 @@ def _proc_ancestor_pids(pid: int) -> tuple[int, ...] | None:
             seen.add(parent)
             current = parent
     except (IndexError, OSError, ValueError):
-        return None
+        return tuple(ancestors) if ancestors else None
     return tuple(ancestors)
 
 
@@ -146,8 +156,8 @@ def _evaluate_window(
     launched_pid: int,
     expected_identity: Mapping[str, str],
     ancestor_pids: AncestorPids,
-) -> tuple[bool, list[str]]:
-    """Evaluate evidence only; it never proves a process-to-window relation."""
+) -> tuple[str | None, list[str]]:
+    """Classify correlation evidence without claiming a guaranteed relation."""
 
     reasons: list[str] = []
     identity_values = {
@@ -163,26 +173,33 @@ def _evaluate_window(
         if identity_values[field] != expected
     ]
     if mismatches:
-        return False, [f"candidate {window.con_id} does not have the exact expected identity: {', '.join(mismatches)}"]
+        return None, [f"candidate {window.con_id} does not have the exact expected identity: {', '.join(mismatches)}"]
     if expected_identity:
         reasons.append(f"candidate {window.con_id} has exact expected identity")
 
     window_pid = _valid_pid(window.pid)
-    if window_pid is None:
-        reasons.append(f"candidate {window.con_id} has no usable PID")
-        return bool(expected_identity), reasons
     if window_pid == launched_pid:
         reasons.append("window PID matches launched process PID")
-        return True, reasons
+        return "pid_exact", reasons
+    if window_pid is not None:
+        observed_ancestors = ancestor_pids(window_pid)
+        if observed_ancestors is None:
+            reasons.append(f"candidate {window.con_id} ancestor PIDs are unavailable")
+        elif launched_pid in observed_ancestors:
+            reasons.append("launched process PID is an ancestor of the window PID")
+            return "descendant", reasons
+        else:
+            reasons.append(f"candidate {window.con_id} PID is unrelated to the launched PID")
+    else:
+        reasons.append(f"candidate {window.con_id} has no usable PID")
 
-    observed_ancestors = ancestor_pids(window_pid)
-    if observed_ancestors is None:
-        reasons.append(f"candidate {window.con_id} ancestor PIDs are unavailable")
-        return bool(expected_identity), reasons
-    if launched_pid in observed_ancestors:
-        reasons.append("launched process PID is an ancestor of the window PID")
-        return True, reasons
-    return False, [f"candidate {window.con_id} PID is not the launched PID or its descendant"]
+    # A newly appeared window with an exact caller-supplied identity is useful
+    # evidence for single-instance and daemonizing applications, but weaker than
+    # a PID relation.
+    if expected_identity:
+        reasons.append("using new-window identity evidence without a process relation")
+        return "identity_only", reasons
+    return None, reasons
 
 
 def _correlation_result(
@@ -193,23 +210,27 @@ def _correlation_result(
     *,
     timed_out: bool,
 ) -> dict[str, Any]:
-    matched: list[tree.WindowSummary] = []
+    ranked: list[tuple[int, str, tree.WindowSummary]] = []
     reasons: list[str] = []
+    strength = {"identity_only": 1, "descendant": 2, "pid_exact": 3}
     for candidate in candidates:
-        qualifies, candidate_reasons = _evaluate_window(
+        basis, candidate_reasons = _evaluate_window(
             candidate, launched["pid"], expected_identity, ancestor_pids
         )
         reasons.extend(candidate_reasons)
-        if qualifies:
-            matched.append(candidate)
+        if basis is not None:
+            ranked.append((strength[basis], basis, candidate))
 
+    strongest = max((item[0] for item in ranked), default=0)
+    matched = [item for item in ranked if item[0] == strongest]
+    match_basis = matched[0][1] if matched else None
     if len(matched) == 1:
         status = "matched"
-        reported = matched
+        reported = [matched[0][2]]
     elif len(matched) > 1:
         status = "ambiguous"
-        reported = matched
-        reasons.append(f"{len(matched)} new windows meet the observed correlation criteria")
+        reported = [item[2] for item in matched]
+        reasons.append(f"{len(matched)} new windows meet the strongest observed correlation criteria")
     else:
         status = "timeout"
         reported = list(candidates)
@@ -222,8 +243,33 @@ def _correlation_result(
     return {
         **launched,
         "status": status,
+        "match_basis": match_basis,
         "candidates": [window.compact() for window in reported],
         "reasons": reasons,
+    }
+
+
+def _observe_tree(client: Any) -> tuple[tree.Snapshot | None, str | None]:
+    try:
+        return tree.build_snapshot(client.request(ipc.GET_TREE)), None
+    except (
+        ipc.SwayUnavailable,
+        ipc.SwayTimeout,
+        ipc.SwayProtocolError,
+        ipc.SwayPayloadTooLarge,
+        tree.TreeFormatError,
+    ) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _observation_failed(launched: Mapping[str, Any], error: str) -> dict[str, Any]:
+    return {
+        **launched,
+        "status": "observation_failed",
+        "match_basis": None,
+        "candidates": [],
+        "reasons": ["process started, but Sway window observation failed"],
+        "observation_error": error,
     }
 
 
@@ -261,54 +307,111 @@ def correlate_launch(
         active_subscription = client.subscribe(["window"])
         owned_subscription = True
 
+    result: dict[str, Any] | None = None
     try:
         baseline = tree.build_snapshot(client.request(ipc.GET_TREE))
         launched = _launched_process(launch)
         baseline_ids = set(baseline.nodes)
 
         if active_subscription is None:
-            current = tree.build_snapshot(client.request(ipc.GET_TREE))
-            return _correlation_result(
+            current, observation_error = _observe_tree(client)
+            if current is None:
+                result = _observation_failed(
+                    launched, observation_error or "unknown observation failure"
+                )
+                return result
+            result = _correlation_result(
                 launched,
                 _new_windows(current, baseline_ids),
                 identity,
                 ancestor_pids,
                 timed_out=False,
             )
+            return result
 
         deadline = monotonic() + timeout
-        last_candidates: tuple[tree.WindowSummary, ...] = ()
+        pending_result: dict[str, Any] | None = None
+        quiet_deadline: float | None = None
         while True:
-            remaining = deadline - monotonic()
+            now = monotonic()
+            wait_deadline = min(deadline, quiet_deadline) if quiet_deadline is not None else deadline
+            remaining = wait_deadline - now
             if remaining <= 0:
-                return _correlation_result(
-                    launched, last_candidates, identity, ancestor_pids, timed_out=True
+                if pending_result is not None and quiet_deadline is not None and quiet_deadline <= deadline:
+                    result = pending_result
+                    return result
+                current, observation_error = _observe_tree(client)
+                if current is None:
+                    result = _observation_failed(
+                        launched, observation_error or "unknown observation failure"
+                    )
+                    return result
+                result = _correlation_result(
+                    launched,
+                    _new_windows(current, baseline_ids),
+                    identity,
+                    ancestor_pids,
+                    timed_out=True,
                 )
+                return result
             try:
-                _event_type, event = active_subscription.recv(remaining)
+                _event_type, _event = active_subscription.recv(remaining)
             except (TimeoutError, ipc.SwayTimeout):
-                return _correlation_result(
-                    launched, last_candidates, identity, ancestor_pids, timed_out=True
+                if pending_result is not None:
+                    result = pending_result
+                    return result
+                current, observation_error = _observe_tree(client)
+                if current is None:
+                    result = _observation_failed(
+                        launched, observation_error or "unknown observation failure"
+                    )
+                    return result
+                result = _correlation_result(
+                    launched,
+                    _new_windows(current, baseline_ids),
+                    identity,
+                    ancestor_pids,
+                    timed_out=True,
                 )
-            if (
-                _event_type != ipc.EVENT_WINDOW
-                or not isinstance(event, Mapping)
-                or event.get("change") != "new"
-            ):
+                return result
+            except (
+                ipc.SwayProtocolError,
+                ipc.SwayPayloadTooLarge,
+                ipc.SwayUnavailable,
+                OSError,
+            ) as exc:
+                result = _observation_failed(launched, f"{type(exc).__name__}: {exc}")
+                return result
+            if _event_type != ipc.EVENT_WINDOW:
                 continue
 
-            current = tree.build_snapshot(client.request(ipc.GET_TREE))
-            last_candidates = _new_windows(current, baseline_ids)
-            result = _correlation_result(
-                launched, last_candidates, identity, ancestor_pids, timed_out=True
-            )
-            if result["status"] != "timeout":
+            current, observation_error = _observe_tree(client)
+            if current is None:
+                result = _observation_failed(
+                    launched, observation_error or "unknown observation failure"
+                )
                 return result
+            candidates = _new_windows(current, baseline_ids)
+            result = _correlation_result(
+                launched, candidates, identity, ancestor_pids, timed_out=True
+            )
+            if result["status"] in {"ambiguous", "matched"}:
+                pending_result = result
+                quiet_deadline = min(deadline, monotonic() + 0.25)
+            else:
+                pending_result = None
+                quiet_deadline = None
     finally:
         if owned_subscription and active_subscription is not None:
             close = getattr(active_subscription, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except OSError as exc:
+                    if result is not None:
+                        result["reasons"].append(
+                            f"failed to close owned window subscription: {type(exc).__name__}: {exc}"
+                        )
 
 
 def launch_and_correlate(

@@ -28,6 +28,17 @@ def _inspect(tmp_path, *, version=None):
     return fake, bound
 
 
+def test_inspect_defaults_to_summary_for_minimal_focus_queries(tmp_path):
+    fake, inspect = _inspect(tmp_path)
+    try:
+        payload = json.loads(inspect({}))
+    finally:
+        fake.close()
+
+    assert payload["ok"] is True
+    assert payload["data"]["focused"]["window"]["con_id"] == 101
+
+
 def test_inspect_summary_reports_version_focus_and_compact_counts(tmp_path):
     fake, inspect = _inspect(tmp_path)
     try:

@@ -6,32 +6,33 @@ Schemas describe intent only; they never contain Sway command strings.
 from __future__ import annotations
 
 
-TARGET_SELECTOR = {
-    "type": "object",
-    "description": (
-        "Exactly one selector: {'con_id': int}, {'mark': str}, or {'match': {...}} "
-        "with conjunctive exact fields."
-    ),
-    "properties": {
-        "con_id": {"type": "integer", "minimum": 1},
-        "mark": {"type": "string"},
-        "match": {
-            "type": "object",
-            "properties": {
-                "app_id": {"type": "string"},
-                "class": {"type": "string"},
-                "instance": {"type": "string"},
-                "title": {"type": "string"},
-                "pid": {"type": "integer"},
-                "shell": {"type": "string"},
-                "workspace": {"type": "string"},
-                "floating": {"type": "boolean"},
+def _target_selector() -> dict[str, object]:
+    return {
+        "type": "object",
+        "description": (
+            "Exactly one selector: {'con_id': int}, {'mark': str}, or {'match': {...}} "
+            "with conjunctive exact fields."
+        ),
+        "properties": {
+            "con_id": {"type": "integer", "minimum": 1},
+            "mark": {"type": "string"},
+            "match": {
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string"},
+                    "class": {"type": "string"},
+                    "instance": {"type": "string"},
+                    "title": {"type": "string"},
+                    "pid": {"type": "integer"},
+                    "shell": {"type": "string"},
+                    "workspace": {"type": "string"},
+                    "floating": {"type": "boolean"},
+                },
+                "additionalProperties": False,
             },
-            "additionalProperties": False,
         },
-    },
-    "additionalProperties": False,
-}
+        "additionalProperties": False,
+    }
 
 
 SWAY_INSPECT = {
@@ -46,6 +47,7 @@ SWAY_INSPECT = {
             "view": {
                 "type": "string",
                 "enum": ["summary", "windows", "workspaces", "outputs", "tree", "marks"],
+                "default": "summary",
             },
             "filter": {
                 "type": "object",
@@ -67,7 +69,7 @@ SWAY_INSPECT = {
             "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
             "include_geometry": {"type": "boolean", "default": True},
         },
-        "required": ["view"],
+        "required": [],
         "additionalProperties": False,
     },
 }
@@ -75,13 +77,13 @@ SWAY_INSPECT = {
 SWAY_WINDOW = {
     "name": "sway_window",
     "description": (
-        "Mutate exactly one existing window or container in the current Sway session. "
-        "Call sway_inspect first and prefer a fresh con_id. Runtime state only."
+        "Mutate exactly one existing window in the current Sway session. Inspect only "
+        "when a unique fresh target is not already known. Runtime state only."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "target": TARGET_SELECTOR,
+            "target": _target_selector(),
             "action": {
                 "type": "string",
                 "enum": [
@@ -107,7 +109,7 @@ SWAY_WINDOW = {
             "enabled": {"type": "boolean"},
             "width": {"type": "integer", "minimum": 1},
             "height": {"type": "integer", "minimum": 1},
-            "unit": {"type": "string", "enum": ["px", "ppt"]},
+            "unit": {"type": "string", "enum": ["px", "ppt"], "default": "px"},
             "position": {
                 "type": "object",
                 "properties": {
@@ -160,13 +162,13 @@ SWAY_LAYOUT = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["set_parent_layout", "split_at", "swap"]},
-            "target": TARGET_SELECTOR,
-            "other_target": TARGET_SELECTOR,
+            "target": _target_selector(),
+            "other_target": _target_selector(),
             "layout": {
                 "type": "string",
                 "enum": ["default", "splith", "splitv", "stacking", "tabbed"],
             },
-            "orientation": {"type": "string", "enum": ["horizontal", "vertical", "none"]},
+            "orientation": {"type": "string", "enum": ["horizontal", "vertical"]},
         },
         "required": ["action", "target"],
         "additionalProperties": False,
@@ -201,7 +203,7 @@ SWAY_LAUNCH = {
                 },
                 "additionalProperties": False,
             },
-            "timeout_seconds": {"type": "number", "minimum": 0.5, "maximum": 30, "default": 10},
+            "timeout_seconds": {"type": "number", "minimum": 0.5, "maximum": 30},
         },
         "required": ["argv"],
         "additionalProperties": False,
@@ -212,28 +214,29 @@ SWAY_RULE = {
     "name": "sway_rule",
     "description": (
         "Manage autonomous window and workspace-output rules in plugin-owned Sway "
-        "configuration. Rules apply to new windows only and keep working without Hermes."
+        "configuration. Reload does not retrofit unchanged open windows. Rules keep working without Hermes."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["list", "get", "preview", "add", "update", "remove"]},
-            "rule_id": {"type": "string"},
+            "rule_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"},
             "kind": {"type": "string", "enum": ["window", "workspace_output"]},
             "match": {
                 "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["exact", "regex"]},
-                    },
-                    "required": ["value"],
-                    "additionalProperties": False,
+                "properties": {
+                    "app_id": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "class": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "instance": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "title": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "window_role": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "shell": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "con_mark": {"type": "object", "properties": {"value": {"type": "string"}, "mode": {"type": "string", "enum": ["exact", "regex"], "default": "exact"}}, "required": ["value"], "additionalProperties": False},
+                    "window_type": {"type": "object", "properties": {"value": {"type": "string", "enum": ["normal", "dialog", "utility", "toolbar", "splash", "menu", "dropdown_menu", "popup_menu", "tooltip", "notification"]}}, "required": ["value"], "additionalProperties": False},
                 },
+                "additionalProperties": False,
             },
-            "intended_cardinality": {"type": "string", "enum": ["one", "many"]},
-            "allow_unverified_cardinality": {"type": "boolean", "default": False},
+            "intended_cardinality": {"type": "string", "enum": ["one", "many"], "default": "many"},
             "destination": {
                 "type": "object",
                 "properties": {
@@ -268,7 +271,7 @@ SWAY_RULE = {
             "workspace": {"type": "string"},
             "outputs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
             "reload": {"type": "boolean", "default": True},
-            "allow_external_conflicts": {"type": "boolean", "default": False},
+
         },
         "required": ["action"],
         "additionalProperties": False,
@@ -285,7 +288,7 @@ SWAY_STARTUP = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["list", "get", "preview", "add", "update", "remove"]},
-            "startup_id": {"type": "string"},
+            "startup_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"},
             "argv": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -295,6 +298,7 @@ SWAY_STARTUP = {
             "run_on": {
                 "type": "string",
                 "enum": ["sway_start_only", "sway_start_and_every_reload"],
+                "default": "sway_start_only",
             },
             "acknowledge_reload_relaunch": {"type": "boolean", "default": False},
             "reload": {"type": "boolean", "default": True},
@@ -303,6 +307,75 @@ SWAY_STARTUP = {
         "additionalProperties": False,
     },
 }
+
+
+_PROPERTY_DESCRIPTIONS = {
+    "sway_inspect": {
+        "view": "Smallest state view needed; omit for focused state and counts.",
+        "filter": "Exact window filters; used only with the windows view.",
+        "max_results": "Maximum list items returned by bounded views.",
+        "include_geometry": "Include window rectangles when geometry matters.",
+    },
+    "sway_window": {
+        "target": "Exactly one live window selector; prefer a fresh con_id when known.",
+        "action": "One bounded runtime mutation to apply.",
+        "workspace": "Exact destination workspace for move_to_workspace.",
+        "output": "Exact output name for move_to_output.",
+        "direction": "Direction for move_direction.",
+        "enabled": "Desired state for floating, fullscreen, or sticky actions.",
+        "width": "Requested width for resize.",
+        "height": "Requested height for resize.",
+        "unit": "Resize unit; defaults to px. Sway may constrain the observed size.",
+        "position": "Floating-window position: center or coordinates, optionally global absolute coordinates.",
+        "mark": "Session mark to add or remove.",
+        "confirm_close": "Must be true for close; Sway requests client closure and observes the result.",
+    },
+    "sway_workspace": {
+        "action": "Focus or create, rename, or move one exact workspace.",
+        "workspace": "Exact workspace name, not next/prev command syntax.",
+        "new_name": "New exact name required by rename.",
+        "output": "Exact connector name required by move_to_output.",
+        "restore_focus": "Return focus to the previously focused workspace after moving another workspace.",
+    },
+    "sway_layout": {
+        "action": "Parent-layout, split-orientation, or swap operation.",
+        "target": "Exactly one container or window selector.",
+        "other_target": "Second exact selector required only by swap.",
+        "layout": "Parent layout required only by set_parent_layout.",
+        "orientation": "Split orientation required only by split_at.",
+    },
+    "sway_launch": {
+        "argv": "Executable and arguments as an array; never a shell command string.",
+        "cwd": "Optional absolute existing working directory.",
+        "wait_for_window": "Observe new Sway windows after process start; disable for background commands.",
+        "expected_identity": "Optional exact app_id for Wayland or class/instance for XWayland correlation.",
+        "timeout_seconds": "Optional correlation timeout; omit to use the plugin setting.",
+    },
+    "sway_rule": {
+        "action": "List/get/preview or mutate one plugin-owned persistent rule.",
+        "rule_id": "Stable optional ID for add; required for get, update, and remove.",
+        "kind": "Window behavior or workspace-to-output placement.",
+        "match": "Restart-stable Sway criteria for a window rule; exact matching is the default.",
+        "intended_cardinality": "Expected current match count for advisory diagnostics; defaults to many.",
+        "destination": "At most one assignment destination: workspace or output.",
+        "effects": "Bounded effects applied when Sway evaluates a matching window rule.",
+        "workspace": "Workspace name for workspace_output rules.",
+        "outputs": "Ordered output preference list for workspace_output rules.",
+        "reload": "Reload the running compositor when its active config includes the managed file.",
+    },
+    "sway_startup": {
+        "action": "List/get/preview or mutate one plugin-owned startup entry.",
+        "startup_id": "Stable optional ID for add; required for get, update, and remove.",
+        "argv": "Executable and arguments rendered shell-safely into Sway configuration.",
+        "run_on": "Start only with Sway by default, or also on every reload with acknowledgement.",
+        "acknowledge_reload_relaunch": "Must be true when run_on relaunches the command after every reload.",
+        "reload": "Reload the running compositor when its active config includes the managed file.",
+    },
+}
+
+for _schema in (SWAY_INSPECT, SWAY_WINDOW, SWAY_WORKSPACE, SWAY_LAYOUT, SWAY_LAUNCH, SWAY_RULE, SWAY_STARTUP):
+    for _property, _description in _PROPERTY_DESCRIPTIONS[_schema["name"]].items():
+        _schema["parameters"]["properties"][_property]["description"] = _description
 
 
 TOOL_SCHEMAS = (

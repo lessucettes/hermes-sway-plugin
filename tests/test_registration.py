@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import yaml
+
 from .helpers import ROOT
 
 from hermes_sway_plugin import registration
@@ -15,6 +17,26 @@ EXPECTED_TOOLS = {
     "sway_rule",
     "sway_startup",
 }
+
+
+def parse_skill_frontmatter(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    _opening, frontmatter, _body = text.split("---", 2)
+    parsed = yaml.safe_load(frontmatter)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def registration_metadata(frontmatter: dict) -> dict:
+    return {
+        "description": frontmatter["description"],
+        "version": frontmatter["version"],
+        "author": frontmatter["author"],
+        "license": frontmatter["license"],
+        "platforms": frontmatter["platforms"],
+        "tags": frontmatter["metadata"]["hermes"]["tags"],
+    }
 
 
 class RecordingContext:
@@ -62,7 +84,13 @@ def test_register_declares_seven_tools_and_namespaced_skill():
     assert ":" not in skill["name"]
     assert skill["path"] == ROOT / "skills" / "sway" / "SKILL.md"
     assert skill["path"].is_file()
-    assert skill["description"]
+    skill_frontmatter = parse_skill_frontmatter(skill["path"])
+    registered_frontmatter = ctx.skill_frontmatter[0]
+    assert skill["description"] == skill_frontmatter["description"]
+    assert registration_metadata(registered_frontmatter) == registration_metadata(
+        skill_frontmatter
+    )
+    assert registered_frontmatter == skill_frontmatter
 
 
 def test_register_returns_json_string_results_from_every_handler():

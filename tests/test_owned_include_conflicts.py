@@ -39,6 +39,19 @@ def test_glob_include_of_the_managed_directory_is_not_a_conflict(tmp_path, monke
     assert scan_include_conflicts(main, managed_include=owned) == ()
 
 
+def test_include_glob_star_does_not_cross_a_path_separator(tmp_path):
+    directory = tmp_path / "hermes"
+    owned = directory / "nested" / "hermes-sway-plugin-rules.conf"
+    owned.parent.mkdir(parents=True)
+    owned.write_text("", encoding="utf-8")
+    main = tmp_path / "config"
+    main.write_text(f"include {directory}/*.conf\n", encoding="utf-8")
+
+    conflicts = scan_include_conflicts(main, managed_include=owned)
+
+    assert [conflict.kind for conflict in conflicts] == ["unscannable_include"]
+
+
 def test_an_unrelated_absolute_include_still_reports_unscannable(tmp_path):
     main = tmp_path / "config"
     owned = tmp_path / "hermes-sway-plugin-rules.conf"

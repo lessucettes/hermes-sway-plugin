@@ -1,8 +1,9 @@
 name: sway
-version: 0.1.0
+version: 0.2.0
 description: Safe Sway 1.9 inspection, runtime control, and persistent configuration tools
 kind: standalone
 author: lessucettes
+platforms: [linux]
 license: MIT
 homepage: https://github.com/lessucettes/hermes-sway-plugin
 tags:

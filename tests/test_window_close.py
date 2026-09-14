@@ -1,9 +1,8 @@
-"""A close must wait for the asynchronous client exit instead of failing early.
+"""A close reports the request separately from observed disappearance.
 
-Sway's ``kill`` terminates the client, which exits asynchronously.  Verified on
-a real Sway 1.9 session: the window is still present in the tree 5-7 ms after the
-command reply and is gone about 250 ms later, so an immediate post-tree check
-reports a false ``postcondition_failed``.
+Sway's ``kill`` asks the view to close; it does not guarantee when the client will
+comply. Bounded polling provides useful observation without turning a responsive
+but still-open client into a false command failure.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ class Clock:
         self.now += seconds
 
 
-def test_close_waits_for_the_client_exit_and_reports_success(tmp_path):
+def test_close_waits_for_disappearance_and_reports_observation(tmp_path):
     before = load_fixture("tree_mixed.json")
     clock = Clock()
     client = RuntimeClient([before, before, without_node_tree(before, 101)])
@@ -41,22 +40,32 @@ def test_close_waits_for_the_client_exit_and_reports_success(tmp_path):
         client, monotonic=clock.monotonic, sleep=clock.sleep, close_verify_seconds=2.0
     ).window({"con_id": 101}, "close", confirm_close=True)
 
-    assert result == {"con_id": 101, "action": "close", "warnings": []}
+    assert result == {
+        "con_id": 101,
+        "action": "close",
+        "close_requested": True,
+        "closed_observed": True,
+        "warnings": [],
+    }
     assert client.commands == ["[con_id=101] kill"]
     assert clock.slept and sum(clock.slept) <= 2.0
 
 
-def test_close_still_fails_when_the_window_never_disappears():
+def test_close_reports_an_unobserved_close_request_instead_of_failing():
     before = load_fixture("tree_mixed.json")
     clock = Clock()
     client = RuntimeClient([before] * 30)
 
-    with pytest.raises(SwayPluginError) as excinfo:
-        RuntimeService(
-            client, monotonic=clock.monotonic, sleep=clock.sleep, close_verify_seconds=1.0
-        ).window({"con_id": 101}, "close", confirm_close=True)
+    result = RuntimeService(
+        client, monotonic=clock.monotonic, sleep=clock.sleep, close_verify_seconds=1.0
+    ).window({"con_id": 101}, "close", confirm_close=True)
 
-    assert excinfo.value.code == "postcondition_failed"
-    assert "remained after close" in excinfo.value.message
+    assert result == {
+        "con_id": 101,
+        "action": "close",
+        "close_requested": True,
+        "closed_observed": False,
+        "warnings": ["close_requested_but_window_still_observed"],
+    }
     assert clock.now >= 1.0
     assert client.requests.count(ipc.GET_TREE) >= 3

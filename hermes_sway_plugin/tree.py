@@ -55,9 +55,14 @@ class NodeSummary:
 
     @property
     def is_window(self) -> bool:
-        # Wayland views carry ``app_id`` but no X11 ``window`` id. XWayland
-        # views carry window properties/window instead. Containers carry none.
-        return self.window is not None or self.app_id is not None or self.x11_class is not None
+        # A native xdg-shell view may map before it publishes an app_id. Sway's
+        # non-null view shell is still authoritative window evidence.
+        return (
+            self.window is not None
+            or self.app_id is not None
+            or self.x11_class is not None
+            or self.shell in {"xdg_shell", "xwayland"}
+        )
 
     @property
     def in_scratchpad(self) -> bool:

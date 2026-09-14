@@ -16,7 +16,8 @@ def test_sway_skill_is_registered_with_valid_frontmatter_and_operational_guidanc
 
     assert text.startswith("---\nname: sway\n")
     assert "\n---\n\n# Sway 1.9 Operating Skill\n" in text
-    assert "`sway_inspect` first" in text
+    assert "Do not call `sway_inspect` first by habit." in text
+    assert "Call `sway_inspect` first." not in text
     assert "`sway_start_only`" in text
     assert "best-effort" in text
     assert "raw Sway command" in text

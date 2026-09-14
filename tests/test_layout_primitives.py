@@ -43,7 +43,8 @@ def test_set_parent_layout_resolves_once_runs_a_typed_command_and_checks_the_fre
         "layout": "stacking",
         "warnings": [WARNING],
     }
-    assert client.commands == ["[con_id=121] layout stacking"]
+    # Sway's layout command already applies to the selected container's parent.
+    assert client.commands == ["[con_id=103] layout stacking"]
     assert client.requests == [ipc.GET_VERSION, ipc.GET_TREE, ipc.GET_TREE]
 
 
@@ -93,8 +94,27 @@ def test_set_parent_layout_addresses_the_target_when_its_parent_is_a_workspace()
 
     result = RuntimeService(client).layout("set_parent_layout", {"con_id": 103}, layout="tabbed")
 
-    assert result["layout"] == "tabbed"
+    assert result == {
+        "action": "set_parent_layout",
+        "con_id": 103,
+        "parent_con_id": 130,
+        "layout": "tabbed",
+        "warnings": [WARNING],
+    }
     assert client.commands == ["[con_id=103] layout tabbed"]
+
+
+def test_set_parent_layout_does_not_accept_the_wrong_ancestor_layout():
+    before = load_fixture("tree_mixed.json")
+    # Selecting con 103 must change parent 121. A change to workspace 95 is one
+    # level too high and must not be accepted as the requested postcondition.
+    after = _updated_layout_tree(before, 95, "stacking")
+    client = RuntimeClient([before, after])
+
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).layout("set_parent_layout", {"con_id": 103}, layout="stacking")
+
+    assert excinfo.value.code == "postcondition_failed"
 
 
 @pytest.mark.parametrize("layout", [None, "grid", True, []])

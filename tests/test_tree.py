@@ -32,6 +32,25 @@ def test_wayland_and_xwayland_windows_keep_their_identity(snapshot):
     assert xterm.app_id is None
 
 
+def test_native_wayland_view_without_app_id_is_still_a_window():
+    raw = load_fixture("tree_mixed.json")
+
+    def replace(node):
+        if node.get("id") == 101:
+            node["app_id"] = None
+            node["shell"] = "xdg_shell"
+            node["window"] = None
+            node["window_properties"] = None
+        for child in [*node.get("nodes", []), *node.get("floating_nodes", [])]:
+            replace(child)
+
+    replace(raw)
+    windows = {window.con_id: window for window in tree.build_snapshot(raw).windows()}
+
+    assert windows[101].shell == "xdg_shell"
+    assert windows[101].app_id is None
+
+
 def test_split_containers_are_parents_not_windows(snapshot):
     assert 120 in snapshot.nodes
     assert snapshot.nodes[120].window is None

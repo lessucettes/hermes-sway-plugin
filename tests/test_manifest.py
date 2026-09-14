@@ -56,3 +56,24 @@ def test_manifest_declares_exact_public_surface():
     assert set(settings) == set(CONFIG_SCHEMA_DEFAULTS)
     assert {key: settings[key]["default"] for key in settings} == CONFIG_SCHEMA_DEFAULTS
     assert manifest.license == "MIT"
+
+
+def test_release_versions_are_consistent():
+    from hermes_sway_plugin.registration import SKILL_FRONTMATTER
+
+    project_lines = (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines()
+    project_start = project_lines.index("[project]")
+    project_version = next(
+        line.split("=", 1)[1].strip().strip('"')
+        for line in project_lines[project_start + 1 :]
+        if line.startswith("version = ")
+    )
+    manifest_version = next(
+        line.split(":", 1)[1].strip()
+        for line in (ROOT / "plugin.yaml").read_text(encoding="utf-8").splitlines()
+        if line.startswith("version:")
+    )
+
+    assert project_version == "0.2.0"
+    assert manifest_version == "0.2.0"
+    assert SKILL_FRONTMATTER["version"] == "0.2.0"

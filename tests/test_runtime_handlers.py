@@ -50,4 +50,4 @@ def test_workspace_handler_returns_runtime_envelope_after_verified_focus():
     assert result["ok"] is True
     assert result["scope"] == "runtime"
     assert result["data"]["workspace"] == "2"
-    assert client.commands == ['workspace "2"']
+    assert client.commands == ['workspace --no-auto-back-and-forth "2"']

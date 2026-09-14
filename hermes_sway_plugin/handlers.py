@@ -14,6 +14,32 @@ ConfigGetter = Callable[..., Any]
 IPCFactory = Callable[..., Any]
 
 _INSPECT_VIEWS = {"summary", "windows", "workspaces", "outputs", "tree", "marks"}
+_WINDOW_ACTION_FIELDS = {
+    "focus": set(),
+    "move_to_workspace": {"workspace"},
+    "move_to_output": {"output"},
+    "move_direction": {"direction"},
+    "set_floating": {"enabled"},
+    "set_fullscreen": {"enabled"},
+    "resize": {"width", "height", "unit"},
+    "position": {"position"},
+    "move_to_scratchpad": set(),
+    "show_from_scratchpad": set(),
+    "set_sticky": {"enabled"},
+    "mark": {"mark"},
+    "unmark": {"mark"},
+    "close": {"confirm_close"},
+}
+_WORKSPACE_ACTION_FIELDS = {
+    "focus_or_create": set(),
+    "rename": {"new_name"},
+    "move_to_output": {"output", "restore_focus"},
+}
+_LAYOUT_ACTION_FIELDS = {
+    "set_parent_layout": {"layout"},
+    "split_at": {"orientation"},
+    "swap": {"other_target"},
+}
 
 
 def _settings(get_config: ConfigGetter) -> Mapping[str, Any]:
@@ -31,6 +57,23 @@ def _require(args: Mapping[str, Any], key: str) -> Any:
     if key not in args or args[key] in (None, ""):
         raise SwayPluginError("invalid_argument", f"missing required argument: {key}", {"argument": key})
     return args[key]
+
+
+def _reject_action_irrelevant_fields(
+    args: Mapping[str, Any],
+    action: object,
+    action_fields: Mapping[str, set[str]],
+    common: set[str],
+) -> None:
+    if not isinstance(action, str) or action not in action_fields:
+        raise SwayPluginError("invalid_argument", "unsupported action", {"action": action})
+    irrelevant = sorted(set(args) - common - action_fields[action])
+    if irrelevant:
+        raise SwayPluginError(
+            "invalid_argument",
+            "arguments are not valid for this action",
+            {"action": action, "fields": irrelevant},
+        )
 
 
 def _bounded_int(value: object, name: str, default: int, minimum: int, maximum: int) -> int:
@@ -186,7 +229,7 @@ def sway_inspect(
     """Return a bounded compact desktop snapshot from a live Sway 1.9 session."""
     if not isinstance(args, Mapping):
         raise SwayPluginError("invalid_argument", "arguments must be an object")
-    view = _require(args, "view")
+    view = args.get("view", "summary")
     if not isinstance(view, str) or view not in _INSPECT_VIEWS:
         raise SwayPluginError("invalid_argument", f"view must be one of {sorted(_INSPECT_VIEWS)}")
     criteria = args.get("filter", {})
@@ -213,8 +256,7 @@ def sway_window(
         raise SwayPluginError("invalid_argument", "arguments must be an object")
     target = _require(args, "target")
     action = _require(args, "action")
-    if not isinstance(action, str):
-        raise SwayPluginError("invalid_argument", "action must be a string")
+    _reject_action_irrelevant_fields(args, action, _WINDOW_ACTION_FIELDS, {"action", "target"})
     timeout = settings.get("ipc_timeout_seconds", 3.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
@@ -236,8 +278,7 @@ def sway_workspace(
         raise SwayPluginError("invalid_argument", "arguments must be an object")
     action = _require(args, "action")
     workspace = _require(args, "workspace")
-    if not isinstance(action, str):
-        raise SwayPluginError("invalid_argument", "action must be a string")
+    _reject_action_irrelevant_fields(args, action, _WORKSPACE_ACTION_FIELDS, {"action", "workspace"})
     timeout = settings.get("ipc_timeout_seconds", 3.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
@@ -294,7 +335,7 @@ def _rule_from_args(args: Mapping[str, Any]) -> dict[str, Any]:
     if kind not in {"window", "workspace_output"}:
         raise SwayPluginError("invalid_argument", "kind must be window or workspace_output")
     if kind == "window":
-        intended = _require(args, "intended_cardinality")
+        intended = args.get("intended_cardinality", "many")
         if intended not in {"one", "many"}:
             raise SwayPluginError("invalid_argument", "intended_cardinality must be one or many")
         return {
@@ -311,15 +352,25 @@ def _rule_from_args(args: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _active_config_has_include(client: Any, include: Path) -> bool:
-    """Require the live configuration to contain this exact absolute include line."""
+def _active_config_has_include(client: Any, include: Path, main_config: Path) -> bool:
+    """Recognize a live literal include that resolves to the managed file.
+
+    Sway expands relative paths, ``~`` and filesystem globs. We mirror those safe
+    cases without evaluating variables or command substitutions.
+    """
 
     reply = client.request(ipc.GET_CONFIG)
     text = reply.get("config") if isinstance(reply, Mapping) else reply
     if not isinstance(text, str):
         raise ipc.SwayProtocolError("GET_CONFIG reply does not contain configuration text")
-    exact = "include " + str(include)
-    return any(line.strip() == exact for line in text.splitlines())
+    owned = {include.resolve()}
+    for raw in text.splitlines():
+        statement = raw.strip()
+        if statement.casefold().startswith("include "):
+            target = statement[8:].strip()
+            if target and persistent.include_target_matches_owned(main_config.parent, target, owned):
+                return True
+    return False
 
 
 def _audit_live_rule_cardinality(
@@ -357,7 +408,7 @@ def _audit_live_rule_cardinality(
         rule["match"],
         rule["intended_cardinality"],
         windows,
-        require_verified=not _boolean(args.get("allow_unverified_cardinality"), "allow_unverified_cardinality", False),
+        require_verified=False,
     )
     return {
         "intended": audit.intended,
@@ -367,31 +418,76 @@ def _audit_live_rule_cardinality(
     }
 
 
+def _record_atomic_writes(
+    writer: Callable[..., persistent.AtomicWrite] | None,
+) -> tuple[Callable[..., persistent.AtomicWrite], list[persistent.AtomicWrite]]:
+    writes: list[persistent.AtomicWrite] = []
+    actual = persistent.atomic_replace if writer is None else writer
+
+    def recording_writer(*args: Any, **kwargs: Any) -> persistent.AtomicWrite:
+        result = actual(*args, **kwargs)
+        writes.append(result)
+        return result
+
+    return recording_writer, writes
+
+
+def _persistent_reload_options(
+    args: Mapping[str, Any], settings: Mapping[str, Any]
+) -> tuple[bool, float, float]:
+    """Validate every post-write setting before a persistent mutation starts."""
+
+    reload_requested = _boolean(args.get("reload"), "reload", True)
+    ipc_timeout = settings.get("ipc_timeout_seconds", 3.0)
+    if not isinstance(ipc_timeout, (int, float)) or isinstance(ipc_timeout, bool) or ipc_timeout <= 0:
+        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
+    reload_timeout = settings.get("reload_timeout_seconds", 5.0)
+    if not isinstance(reload_timeout, (int, float)) or isinstance(reload_timeout, bool) or reload_timeout <= 0:
+        raise SwayPluginError("invalid_argument", "reload_timeout_seconds must be a positive number")
+    return reload_requested, float(ipc_timeout), float(reload_timeout)
+
+
 def _apply_persistent_reload(
     args: Mapping[str, Any],
     settings: Mapping[str, Any],
     paths: persistent.ManagedRulePaths | persistent.ManagedStartupPaths,
+    write: persistent.AtomicWrite,
+    reload_options: tuple[bool, float, float],
     *,
     ipc_factory: IPCFactory,
     reload_fn: Callable[..., persistent.ReloadResult],
 ) -> tuple[list[str], dict[str, Any]]:
     """Reload only when the running Sway config explicitly owns this include."""
 
-    if not _boolean(args.get("reload"), "reload", True):
+    reload_requested, ipc_timeout, reload_timeout = reload_options
+    if not reload_requested:
+        persistent.discard_atomic_write(write)
         return [], {"reloaded": False}
-    timeout = settings.get("ipc_timeout_seconds", 3.0)
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
-        raise SwayPluginError("invalid_argument", "ipc_timeout_seconds must be a positive number")
     try:
-        client = ipc_factory(timeout=float(timeout))
-        if not _active_config_has_include(client, paths.include):
+        client = ipc_factory(timeout=ipc_timeout)
+        if not _active_config_has_include(client, paths.include, paths.main_config):
+            persistent.discard_atomic_write(write)
             return ["include_not_configured"], {"reloaded": False}
     except (ipc.SwayUnavailable, ipc.SwayTimeout, ipc.SwayProtocolError):
+        persistent.discard_atomic_write(write)
         return ["reload_not_attempted"], {"reloaded": False}
-    reload_timeout = settings.get("reload_timeout_seconds", 5.0)
-    if not isinstance(reload_timeout, (int, float)) or isinstance(reload_timeout, bool) or reload_timeout <= 0:
-        raise SwayPluginError("invalid_argument", "reload_timeout_seconds must be a positive number")
-    result = reload_fn(client, lambda: None, timeout=float(reload_timeout))
+    result = reload_fn(
+        client,
+        lambda: persistent.restore_atomic_write(write),
+        timeout=reload_timeout,
+    )
+    persistent.discard_atomic_write(write)
+    if result.rolled_back:
+        raise SwayPluginError(
+            "reload_rolled_back",
+            "Sway did not confirm the requested configuration reload; the previous managed file was restored",
+            {
+                "include": str(paths.include),
+                "reloaded": False,
+                "rolled_back": True,
+                "reload_error": result.error,
+            },
+        )
     return [], {"reloaded": result.reloaded, "rolled_back": result.rolled_back}
 
 
@@ -415,10 +511,16 @@ def sway_rule(
     if action == "preview":
         rule = persistent.normalize_managed_rule(_rule_from_args(args))
         audit_data = None
+        warnings = ("applies_to_new_windows_only",) if rule["kind"] == "window" else ()
         return ok(
             PERSISTENT,
-            {"action": "preview", "rule": rule, "rendered": persistent.render_rule(rule)},
-            ("applies_to_new_windows_only",),
+            {
+                "action": "preview",
+                "rule": rule,
+                "rendered": persistent.render_rule(rule),
+                "include": str(persistent.managed_rule_paths(settings.get("config_dir", "")).include),
+            },
+            warnings,
         )
 
     store = persistent.ManagedRuleStore(settings.get("config_dir", ""))
@@ -427,35 +529,24 @@ def sway_rule(
     if action == "get":
         return ok(PERSISTENT, {"action": action, "rule": store.get(_require(args, "rule_id"))})
 
+    reload_options = _persistent_reload_options(args, settings)
     backup_keep = settings.get("backup_keep", 10)
+    recording_writer, writes = _record_atomic_writes(atomic_replace_fn)
     write_kwargs = {
         "subprocess_run": subprocess_run,
-        "atomic_replace_fn": atomic_replace_fn,
+        "atomic_replace_fn": recording_writer,
         "backup_count": backup_keep,
     }
+    external_conflicts: tuple[persistent.IncludeConflict, ...] = ()
     if action == "add":
         requested = {**_rule_from_args(args), "rule_id": args.get("rule_id")}
         audit_data = _audit_live_rule_cardinality(requested, args, settings, ipc_factory=ipc_factory)
-        if not _boolean(args.get("allow_external_conflicts"), "allow_external_conflicts", False):
-            conflicts = store._conflicts(requested)
-            if conflicts:
-                raise SwayPluginError(
-                    "external_conflict",
-                    f"refusing to write conflicting external rule statements: {conflicts[0].text[:200]}",
-                    {"kind": conflicts[0].kind, "source": str(conflicts[0].source), "line": conflicts[0].line},
-                )
+        external_conflicts = store._conflicts(requested)
         result = store.add(requested, **write_kwargs)
     elif action == "update":
         requested = _rule_from_args(args)
         audit_data = _audit_live_rule_cardinality(requested, args, settings, ipc_factory=ipc_factory)
-        if not _boolean(args.get("allow_external_conflicts"), "allow_external_conflicts", False):
-            conflicts = store._conflicts(requested)
-            if conflicts:
-                raise SwayPluginError(
-                    "external_conflict",
-                    f"refusing to write conflicting external rule statements: {conflicts[0].text[:200]}",
-                    {"kind": conflicts[0].kind, "source": str(conflicts[0].source), "line": conflicts[0].line},
-                )
+        external_conflicts = store._conflicts(requested)
         result = store.update(_require(args, "rule_id"), requested, **write_kwargs)
     else:
         audit_data = None
@@ -464,20 +555,46 @@ def sway_rule(
         args,
         settings,
         store.paths,
+        writes[-1],
+        reload_options,
         ipc_factory=ipc_factory,
         reload_fn=reload_fn,
     )
+    applies_to_new_windows = action in {"add", "update"} and result.get("kind") == "window"
+    result_warnings: list[str] = []
+    if applies_to_new_windows:
+        result_warnings.append("applies_to_new_windows_only")
+    if audit_data is not None and not audit_data["verified"]:
+        result_warnings.append("cardinality_unverified")
+    if external_conflicts:
+        result_warnings.append("external_rule_statements_present")
+    result_warnings.extend(reload_warnings)
     return ok(
         PERSISTENT,
         {
             "action": action,
             "rule": result,
             "include": str(store.paths.include),
-            "applies_to_new_windows_only": True,
+            "applies_to_new_windows_only": applies_to_new_windows,
             **reload_data,
             **({"cardinality_audit": audit_data} if audit_data is not None else {}),
+            **(
+                {
+                    "external_conflicts": [
+                        {
+                            "kind": conflict.kind,
+                            "source": str(conflict.source),
+                            "line": conflict.line,
+                            "text": conflict.text,
+                        }
+                        for conflict in external_conflicts
+                    ]
+                }
+                if external_conflicts
+                else {}
+            ),
         },
-        ("applies_to_new_windows_only", *reload_warnings),
+        result_warnings,
     )
 
 
@@ -493,8 +610,7 @@ def sway_layout(
         raise SwayPluginError("invalid_argument", "arguments must be an object")
     action = _require(args, "action")
     target = _require(args, "target")
-    if not isinstance(action, str):
-        raise SwayPluginError("invalid_argument", "action must be a string")
+    _reject_action_irrelevant_fields(args, action, _LAYOUT_ACTION_FIELDS, {"action", "target"})
     if action == "swap" and args.get("other_target") in (None, ""):
         raise SwayPluginError("invalid_argument", "swap requires other_target", {"argument": "other_target"})
     timeout = settings.get("ipc_timeout_seconds", 3.0)
@@ -590,10 +706,12 @@ def sway_startup(
     if action == "get":
         return ok(PERSISTENT, {"action": action, "entry": _startup_result(store.get(_entry_id_arg(args)))})
 
+    reload_options = _persistent_reload_options(args, settings)
     backup_keep = settings.get("backup_keep", 10)
+    recording_writer, writes = _record_atomic_writes(atomic_replace_fn)
     write_kwargs = {
         "subprocess_run": subprocess_run,
-        "atomic_replace_fn": atomic_replace_fn,
+        "atomic_replace_fn": recording_writer,
         "backup_count": backup_keep,
     }
     if action == "add":
@@ -606,13 +724,16 @@ def sway_startup(
         args,
         settings,
         store.paths,
+        writes[-1],
+        reload_options,
         ipc_factory=ipc_factory,
         reload_fn=reload_fn,
     )
+    entry_warnings = _startup_warnings(result) if action in {"add", "update"} else []
     return ok(
         PERSISTENT,
         {"action": action, "entry": _startup_result(result), "include": str(store.paths.include), **reload_data},
-        (*_startup_warnings(result), *reload_warnings),
+        (*entry_warnings, *reload_warnings),
     )
 
 
@@ -647,8 +768,14 @@ def _translate_exception(exc: Exception) -> SwayPluginError:
     if isinstance(exc, persistent.ReloadRollbackError):
         return SwayPluginError("reload_failed", str(exc), recoverable=False)
     if isinstance(exc, persistent.PersistentConfigError):
-        code = "rule_not_found" if "not found" in str(exc) else "invalid_rule"
-        return SwayPluginError(code, str(exc))
+        message = str(exc)
+        if "startup entry not found" in message:
+            code = "startup_not_found"
+        elif "rule not found" in message:
+            code = "rule_not_found"
+        else:
+            code = "invalid_rule"
+        return SwayPluginError(code, message)
     return SwayPluginError("internal_error", f"{type(exc).__name__}: {exc}", recoverable=False)
 
 
