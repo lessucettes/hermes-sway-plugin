@@ -88,15 +88,43 @@ a stable success or error envelope:
   observable postcondition. Sway command batches are not transactional.
 - `set_parent_layout` selects the requested container because Sway's `layout`
   command changes that selected container's parent layout.
+- `split_at` creates a split at the selected container. When one current sibling
+  needs its own nested group, split at that sibling first; use
+  `set_parent_layout` only when the existing parent—and therefore the current
+  sibling group—should change layout.
 - Floating-window coordinates support workspace-relative and global absolute
-  positioning. Resize returns both the requested size and the rectangle Sway
-  actually reports; compositor constraints can change the observed geometry.
+  positioning. Resize accepts floating or tiled non-fullscreen windows and one
+  or both dimensions. If `unit` is omitted, the contextual Sway default is used:
+  pixels for floating windows and percentage points for tiled windows. Tiled
+  resize changes the selected container's share in the relevant ancestor split;
+  the requested value is not an exact final pixel-rectangle postcondition.
+  Results return the requested axes, resolved unit, before/fresh rectangles, and
+  per-axis changed status. A successful Sway reply that leaves every requested
+  axis unchanged is reported with a warning rather than as an attained size.
 - `close` requires `confirm_close: true` and sends Sway's `kill` command. The
   result distinguishes `close_requested` from `closed_observed`; it does not
   infer which process signal or client-side shutdown behavior occurred.
 - Directional movement, centering, splitting, and automatic container
   flattening remain Sway-controlled. Results and warnings describe what the
   plugin can observe rather than promising a complete topology.
+
+### Runtime socket discovery
+
+Runtime tools need a connectable Sway IPC socket. Automatic discovery checks, in
+order, the process `SWAYSOCK`/`SWAYSOCK_WLR`, `sway --get-socketpath`, the
+process `I3SOCK`, and then the same socket variables in the optional systemd user
+environment. A dead automatic candidate is skipped, including an inherited path
+left stale after a compositor restart. The systemd fallback is used only when a
+user manager is reachable and the Sway session has imported its socket variable.
+
+Launching Hermes from a terminal inside Sway is supported through inherited
+environment variables. Launching it from a TTY or another process tree is also
+supported when either `sway --get-socketpath` succeeds there or the current
+socket was imported into the systemd user environment. The plugin does not glob
+runtime directories for sockets because multiple Sway sessions would make that
+selection unsafe. Programmatic callers that give `SwayIPC` an explicit socket
+path get strict behavior: an unreachable explicit path is reported rather than
+silently attaching to a different session.
 
 ## Persistent configuration
 

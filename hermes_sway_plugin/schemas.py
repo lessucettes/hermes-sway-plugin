@@ -109,7 +109,7 @@ SWAY_WINDOW = {
             "enabled": {"type": "boolean"},
             "width": {"type": "integer", "minimum": 1},
             "height": {"type": "integer", "minimum": 1},
-            "unit": {"type": "string", "enum": ["px", "ppt"], "default": "px"},
+            "unit": {"type": "string", "enum": ["px", "ppt"]},
             "position": {
                 "type": "object",
                 "properties": {
@@ -323,9 +323,9 @@ _PROPERTY_DESCRIPTIONS = {
         "output": "Exact output name for move_to_output.",
         "direction": "Direction for move_direction.",
         "enabled": "Desired state for floating, fullscreen, or sticky actions.",
-        "width": "Requested width for resize.",
-        "height": "Requested height for resize.",
-        "unit": "Resize unit; defaults to px. Sway may constrain the observed size.",
+        "width": "Requested width for resize; provide one axis or both.",
+        "height": "Requested height for resize; provide one axis or both.",
+        "unit": "Resize unit; omit for Sway's contextual default: px when floating, ppt when tiled.",
         "position": "Floating-window position: center or coordinates, optionally global absolute coordinates.",
         "mark": "Session mark to add or remove.",
         "confirm_close": "Must be true for close; Sway requests client closure and observes the result.",

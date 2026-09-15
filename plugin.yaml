@@ -1,5 +1,5 @@
 name: sway
-version: 0.2.0
+version: 0.2.1
 description: Safe Sway 1.9 inspection, runtime control, and persistent configuration tools
 kind: standalone
 author: lessucettes

@@ -1,7 +1,7 @@
 ---
 name: sway
 description: Control Sway windows, workspaces, layouts, and rules.
-version: 0.2.0
+version: 0.2.1
 author: lessucettes, Hermes Agent
 license: MIT
 platforms: [linux]
@@ -66,6 +66,7 @@ Pass only fields relevant to the selected action.
 - `sway_window` changes exactly one open window. Position, sticky state, and resize are meaningful only where Sway permits them; do not silently enable floating to force a request through.
 - `sway_workspace` can focus or create an exact workspace without prior inspection. Rename and move-to-output require an existing workspace.
 - `sway_layout` operates relative to containers: `set_parent_layout` changes the target's parent layout, `split_at` changes the split at the target, and `swap` needs two unique targets. Inspect the tree first when that relationship is not already known.
+- Use `split_at` when you need to create a nested split/group around one existing sibling before adding or moving another container into that group. Use `set_parent_layout` when you intentionally want to change the target's existing parent and therefore affect its current sibling group.
 - `sway_window` action `close` is a Sway client-close request, not a POSIX signal sent to a PID. Set `confirm_close: true`. Treat `close_requested` and `closed_observed` separately; a client may delay or refuse closure.
 
 Trust the tool's verified postcondition when it succeeds. Inspect again only when the returned observation is insufficient or an error says the observed state differs.

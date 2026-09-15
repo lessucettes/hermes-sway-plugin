@@ -39,6 +39,11 @@ def test_schema_defaults_and_enums_match_handlers():
     layout = SCHEMAS["sway_layout"]["parameters"]
     assert layout["properties"]["orientation"]["enum"] == ["horizontal", "vertical"]
 
+    window = SCHEMAS["sway_window"]["parameters"]
+    assert "default" not in window["properties"]["unit"]
+    assert "one axis" in window["properties"]["width"]["description"]
+    assert "one axis" in window["properties"]["height"]["description"]
+
     rule = SCHEMAS["sway_rule"]["parameters"]
     assert rule["properties"]["intended_cardinality"]["default"] == "many"
     assert "allow_unverified_cardinality" not in rule["properties"]

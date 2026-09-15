@@ -74,38 +74,111 @@ def _valid_socket_path(candidate: object) -> Optional[str]:
     return candidate
 
 
+def _unreachable_socket_detail(path: str) -> str:
+    return "exists but refuses connections" if os.path.lexists(path) else "does not exist"
+
+
+def _systemd_user_environment() -> tuple[dict[str, str], str | None]:
+    """Read only socket variables from the optional systemd user environment."""
+    try:
+        probe = _run_quiet(["systemctl", "--user", "show-environment"])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {}, str(exc)
+    if probe.returncode != 0:
+        detail = probe.stderr.strip()[:200] or f"exited {probe.returncode}"
+        return {}, detail
+    values: dict[str, str] = {}
+    for line in probe.stdout.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name in {"SWAYSOCK", "SWAYSOCK_WLR", "I3SOCK"}:
+            resolved = _valid_socket_path(value)
+            if resolved:
+                values[name] = resolved
+    return values, None
+
+
 def discover_socket_path(explicit: Optional[str] = None) -> str:
-    """Resolve the Sway IPC socket without globbing.
+    """Resolve one connectable Sway IPC socket without filesystem globbing.
 
-    Order: explicit argument -> ``SWAYSOCK`` -> ``sway --get-socketpath`` ->
-    ``I3SOCK``. Globbing for sockets is unsafe when several sessions run.
+    An explicit path is strict: if it is unreachable, automatic discovery is not
+    attempted. Dead automatic candidates are skipped in favor of later sources.
     """
-    resolved = _valid_socket_path(explicit)
-    if resolved:
-        return resolved
+    if explicit is not None:
+        resolved = _valid_socket_path(explicit)
+        if resolved is None:
+            raise SwayUnavailable(
+                "explicit Sway IPC socket path is empty; refusing automatic fallback"
+            )
+        if socket_is_live(resolved):
+            return resolved
+        raise SwayUnavailable(
+            "explicit Sway IPC socket is unreachable "
+            f"({resolved}: {_unreachable_socket_detail(resolved)}); "
+            "refusing automatic fallback"
+        )
 
+    failures: list[str] = []
+    inherited: dict[str, str] = {}
     for variable in ("SWAYSOCK", "SWAYSOCK_WLR"):
         resolved = _valid_socket_path(os.environ.get(variable))
         if resolved:
-            return resolved
+            inherited[variable] = resolved
+            if socket_is_live(resolved):
+                return resolved
+            failures.append(
+                f"stale {variable} ({resolved}: {_unreachable_socket_detail(resolved)})"
+            )
 
     try:
         probe = _run_quiet(["sway", "--get-socketpath"])
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
         probe = None
-    if probe is not None and probe.returncode == 0:
-        resolved = _valid_socket_path(probe.stdout)
-        if resolved:
-            return resolved
+        failures.append(f"`sway --get-socketpath` failed: {exc}")
+    if probe is not None:
+        if probe.returncode == 0:
+            resolved = _valid_socket_path(probe.stdout)
+            if resolved and socket_is_live(resolved):
+                return resolved
+            if resolved:
+                failures.append(
+                    "stale `sway --get-socketpath` result "
+                    f"({resolved}: {_unreachable_socket_detail(resolved)})"
+                )
+            else:
+                failures.append("`sway --get-socketpath` returned an empty path")
+        else:
+            detail = probe.stderr.strip()[:200] or f"exited {probe.returncode}"
+            failures.append(f"`sway --get-socketpath` failed: {detail}")
 
     resolved = _valid_socket_path(os.environ.get("I3SOCK"))
     if resolved:
-        return resolved
+        inherited["I3SOCK"] = resolved
+        if socket_is_live(resolved):
+            return resolved
+        failures.append(
+            f"stale I3SOCK ({resolved}: {_unreachable_socket_detail(resolved)})"
+        )
 
-    raise SwayUnavailable(
-        "no Sway IPC socket found (checked the explicit path, SWAYSOCK, "
-        "`sway --get-socketpath`, and I3SOCK)"
-    )
+    systemd_environment, systemd_error = _systemd_user_environment()
+    for variable in ("SWAYSOCK", "SWAYSOCK_WLR", "I3SOCK"):
+        resolved = systemd_environment.get(variable)
+        if resolved:
+            if socket_is_live(resolved):
+                return resolved
+            failures.append(
+                f"stale systemd user {variable} "
+                f"({resolved}: {_unreachable_socket_detail(resolved)})"
+            )
+    if not inherited:
+        failures.insert(
+            0,
+            "process environment has no SWAYSOCK, SWAYSOCK_WLR, or I3SOCK",
+        )
+    if not systemd_environment:
+        detail = systemd_error or "contains no Sway socket variables"
+        failures.append(f"systemd user environment unavailable: {detail}")
+
+    raise SwayUnavailable("no usable Sway IPC socket found; " + "; ".join(failures))
 
 
 def socket_is_live(path: str, timeout: float = 1.0) -> bool:

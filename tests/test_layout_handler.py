@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 from hermes_sway_plugin import handlers
@@ -18,7 +19,16 @@ def _bound(client):
 
 def test_layout_handler_returns_runtime_envelope_and_ancestry_warning():
     before = load_fixture("tree_mixed.json")
-    client = RuntimeClient([before, before])
+    after = copy.deepcopy(before)
+
+    def update_parent(node):
+        if node.get("id") == 121:
+            node["layout"] = "splith"
+            return True
+        return any(update_parent(child) for child in node.get("nodes", []) + node.get("floating_nodes", []))
+
+    assert update_parent(after)
+    client = RuntimeClient([before, after])
 
     result = json.loads(_bound(client)["sway_layout"]({"action": "split_at", "target": {"con_id": 103}, "orientation": "horizontal"}))
 

@@ -21,4 +21,6 @@ def test_sway_skill_is_registered_with_valid_frontmatter_and_operational_guidanc
     assert "`sway_start_only`" in text
     assert "best-effort" in text
     assert "raw Sway command" in text
+    assert "create a nested split/group around one existing sibling" in text
+    assert "affect its current sibling group" in text
     assert skill_path == ROOT / "skills" / "sway" / "SKILL.md"

@@ -202,6 +202,37 @@ def main() -> int:
 
             launch_xmessage("hermes-it-two")
             second = wait_for(lambda: window_named("hermes-it-two"))
+            launch_xmessage("hermes-it-three")
+            third = wait_for(lambda: window_named("hermes-it-three"))
+            assert third.floating is False
+            tiled_resize = service.window(
+                {"con_id": second.con_id}, "resize", width=55, unit="ppt"
+            )
+            assert tiled_resize["axis_changed"] == {"width": True}
+            record("tiled one-axis resize reports fresh geometry", con_id=second.con_id)
+            before_split = snapshot()
+            second_before_split = before_split.node(second.con_id)
+            assert second_before_split is not None and second_before_split.parent_id is not None
+            old_parent_id = second_before_split.parent_id
+            split_result = service.layout(
+                "split_at", {"con_id": second.con_id}, orientation="vertical"
+            )
+            after_split = snapshot()
+            second_after_split = after_split.node(second.con_id)
+            assert second_after_split is not None and second_after_split.parent_id is not None
+            split_parent = after_split.node(second_after_split.parent_id)
+            assert split_parent is not None
+            assert split_parent.id != old_parent_id
+            assert split_parent.layout == "splitv"
+            assert split_parent.child_ids == (second.con_id,)
+            outer_parent = after_split.node(split_parent.parent_id) if split_parent.parent_id else None
+            assert outer_parent is not None and first.con_id in outer_parent.child_ids
+            record(
+                "split_at creates a nested sibling group",
+                wrapper=split_parent.id,
+                orientation=split_result["orientation"],
+            )
+
             layout_result = service.layout(
                 "set_parent_layout", {"con_id": second.con_id}, layout="tabbed"
             )
@@ -240,7 +271,12 @@ def main() -> int:
             assert rules_file.read_text(encoding="utf-8") == previous
             record("managed file rollback restores exact prior content")
 
-            for title in ("hermes-it-rule", "hermes-it-two", "hermes-it-one"):
+            for title in (
+                "hermes-it-rule",
+                "hermes-it-three",
+                "hermes-it-two",
+                "hermes-it-one",
+            ):
                 current = window_named(title)
                 if current is not None:
                     result = service.window(

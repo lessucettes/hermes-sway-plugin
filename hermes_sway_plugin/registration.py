@@ -18,7 +18,7 @@ SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / SKILL_NAME / "S
 SKILL_FRONTMATTER: dict[str, Any] = {
     "name": SKILL_NAME,
     "description": "Control Sway windows, workspaces, layouts, and rules.",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "author": "lessucettes, Hermes Agent",
     "license": "MIT",
     "platforms": ["linux"],

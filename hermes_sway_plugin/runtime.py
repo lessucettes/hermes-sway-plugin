@@ -170,11 +170,25 @@ class RuntimeService:
                 raise SwayPluginError("invalid_argument", "orientation must be horizontal or vertical")
             self._run(f"{commands.criterion_for_con_id(node.id)} split {orientation}")
             after = self._post_snapshot()
-            if after.node(node.id) is None:
+            current = after.node(node.id)
+            if current is None:
                 raise SwayPluginError(
                     "postcondition_failed",
                     "target disappeared while verifying the split",
                     {"con_id": node.id, "action": action},
+                )
+            current_parent = after.node(current.parent_id) if current.parent_id is not None else None
+            expected_layout = "splith" if orientation == "horizontal" else "splitv"
+            if current_parent is None or current_parent.layout != expected_layout:
+                raise SwayPluginError(
+                    "postcondition_failed",
+                    "target parent did not reach the requested split orientation",
+                    {
+                        "con_id": node.id,
+                        "orientation": orientation,
+                        "observed_parent_con_id": current_parent.id if current_parent else None,
+                        "observed_layout": current_parent.layout if current_parent else None,
+                    },
                 )
             return {"action": action, "con_id": node.id, "orientation": orientation, "warnings": warnings}
 
@@ -251,6 +265,7 @@ class RuntimeService:
         position: Mapping[str, Any] | None = None
         expected_position: tuple[int, int] | None = None
         mark: str | None = None
+        current_before: tree.WindowSummary | None = None
         if action == "focus":
             command = f"{criterion} focus"
         elif action == "move_to_workspace":
@@ -276,15 +291,33 @@ class RuntimeService:
             command = f"{criterion} {operation} {'enable' if enabled else 'disable'}"
         elif action == "resize":
             current_before = self._current_window(before, node.id)
-            if current_before is None or not current_before.floating or current_before.fullscreen:
-                raise SwayPluginError("precondition_failed", "resize requires a floating, non-fullscreen window")
+            if current_before is None or current_before.fullscreen:
+                raise SwayPluginError("precondition_failed", "resize requires a non-fullscreen window")
             width, height = arguments.get("width"), arguments.get("height")
-            unit = arguments.get("unit", "px")
-            if not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in (width, height)):
-                raise SwayPluginError("invalid_argument", "width and height must be positive integers")
+            for name, value in (("width", width), ("height", height)):
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool) or value <= 0
+                ):
+                    raise SwayPluginError("invalid_argument", f"{name} must be a positive integer")
+            if width is None and height is None:
+                raise SwayPluginError(
+                    "invalid_argument", "resize requires at least one of width or height"
+                )
+            unit = arguments.get("unit")
+            if unit is None:
+                unit = "px" if current_before.floating else "ppt"
             if unit not in {"px", "ppt"}:
                 raise SwayPluginError("invalid_argument", "unit must be px or ppt")
-            command = f"{criterion} resize set {width} {unit} {height} {unit}"
+            dimensions = []
+            if width is not None:
+                dimensions.extend(("width", str(width), unit))
+            if height is not None:
+                dimensions.extend(("height", str(height), unit))
+            command = f"{criterion} resize set {' '.join(dimensions)}"
+            if not current_before.floating:
+                warnings.append(
+                    "tiled resize changes split proportions; observed geometry may differ from the requested size"
+                )
         elif action == "position":
             current_before = self._current_window(before, node.id)
             if current_before is None or not current_before.floating or current_before.fullscreen:
@@ -436,7 +469,32 @@ class RuntimeService:
                 "rect": current.rect.compact() if current.rect is not None else None,
             }
         if action == "resize":
-            result["requested"] = {"width": width, "height": height, "unit": unit}
+            assert current_before is not None
+            before_rect = current_before.rect.compact() if current_before.rect is not None else None
+            axis_changed: dict[str, bool | None] = {}
+            if width is not None:
+                axis_changed["width"] = (
+                    None
+                    if current_before.rect is None or current.rect is None
+                    else current_before.rect.width != current.rect.width
+                )
+            if height is not None:
+                axis_changed["height"] = (
+                    None
+                    if current_before.rect is None or current.rect is None
+                    else current_before.rect.height != current.rect.height
+                )
+            if axis_changed and all(changed is False for changed in axis_changed.values()):
+                warnings.append(
+                    "Sway accepted the resize but no requested axis changed in the fresh geometry"
+                )
+            result["before"] = {"rect": before_rect}
+            result["axis_changed"] = axis_changed
+            result["requested"] = {
+                **({"width": width} if width is not None else {}),
+                **({"height": height} if height is not None else {}),
+                "unit": unit,
+            }
         return result
 
     def workspace(self, action: str, workspace: object, **arguments: Any) -> dict[str, Any]:

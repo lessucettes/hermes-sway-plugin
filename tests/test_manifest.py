@@ -74,6 +74,6 @@ def test_release_versions_are_consistent():
         if line.startswith("version:")
     )
 
-    assert project_version == "0.2.0"
-    assert manifest_version == "0.2.0"
-    assert SKILL_FRONTMATTER["version"] == "0.2.0"
+    assert project_version == "0.2.1"
+    assert manifest_version == "0.2.1"
+    assert SKILL_FRONTMATTER["version"] == "0.2.1"

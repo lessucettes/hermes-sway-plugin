@@ -150,7 +150,8 @@ def test_set_parent_layout_requires_the_target_to_survive_post_verification():
 
 def test_split_at_uses_only_horizontal_or_vertical_orientation_and_checks_a_fresh_tree():
     before = load_fixture("tree_mixed.json")
-    client = RuntimeClient([before, before])
+    after = _updated_layout_tree(before, 121, "splitv")
+    client = RuntimeClient([before, after])
 
     result = RuntimeService(client).layout("split_at", {"con_id": 103}, orientation="vertical")
 
@@ -162,6 +163,17 @@ def test_split_at_uses_only_horizontal_or_vertical_orientation_and_checks_a_fres
     }
     assert client.commands == ["[con_id=103] split vertical"]
     assert client.requests == [ipc.GET_VERSION, ipc.GET_TREE, ipc.GET_TREE]
+
+
+def test_split_at_rejects_a_fresh_tree_with_the_wrong_immediate_parent_orientation():
+    before = load_fixture("tree_mixed.json")
+    after = _updated_layout_tree(before, 95, "splitv")
+    client = RuntimeClient([before, after])
+
+    with pytest.raises(SwayPluginError) as excinfo:
+        RuntimeService(client).layout("split_at", {"con_id": 103}, orientation="vertical")
+
+    assert excinfo.value.code == "postcondition_failed"
 
 
 def test_split_at_requires_the_target_to_survive_post_verification():

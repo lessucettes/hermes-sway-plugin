@@ -31,19 +31,61 @@ def test_set_floating_verifies_requested_state():
     assert client.commands == ["[con_id=108] floating disable"]
 
 
-def test_resize_requires_a_floating_non_fullscreen_window_and_checks_dimensions():
-    tiled = RuntimeClient([load_fixture("tree_mixed.json")])
-    with pytest.raises(SwayPluginError, match="floating") as excinfo:
-        RuntimeService(tiled).window({"con_id": 103}, "resize", width=700, height=500, unit="px")
-    assert excinfo.value.code == "precondition_failed"
-    assert tiled.commands == []
-
+def test_resize_accepts_tiled_windows_and_reports_observed_geometry():
     before = load_fixture("tree_mixed.json")
-    after = updated_node_tree(before, 108, rect={"x": 20, "y": 30, "width": 700, "height": 500})
+    after = updated_node_tree(before, 103, rect={"x": 0, "y": 0, "width": 1394, "height": 1080})
     client = RuntimeClient([before, after])
-    RuntimeService(client).window({"con_id": 108}, "resize", width=700, height=500, unit="px")
+    result = RuntimeService(client).window({"con_id": 103}, "resize", width=55, unit="ppt")
 
-    assert client.commands == ["[con_id=108] resize set 700 px 500 px"]
+    assert client.commands == ["[con_id=103] resize set width 55 ppt"]
+    assert result["requested"] == {"width": 55, "unit": "ppt"}
+    assert result["before"]["rect"]["width"] != 1394
+    assert result["observed"]["rect"]["width"] == 1394
+    assert result["axis_changed"] == {"width": True}
+    assert result["warnings"] == [
+        "tiled resize changes split proportions; observed geometry may differ from the requested size"
+    ]
+
+
+def test_resize_accepts_one_axis_and_uses_contextual_sway_defaults():
+    before = load_fixture("tree_mixed.json")
+    floating_after = updated_node_tree(
+        before, 108, rect={"x": 20, "y": 30, "width": 400, "height": 500}
+    )
+    floating = RuntimeClient([before, floating_after])
+
+    floating_result = RuntimeService(floating).window(
+        {"con_id": 108}, "resize", height=500
+    )
+
+    assert floating.commands == ["[con_id=108] resize set height 500 px"]
+    assert floating_result["requested"] == {"height": 500, "unit": "px"}
+
+    tiled_after = updated_node_tree(
+        before, 103, rect={"x": 0, "y": 0, "width": 960, "height": 1080}
+    )
+    tiled = RuntimeClient([before, tiled_after])
+
+    tiled_result = RuntimeService(tiled).window({"con_id": 103}, "resize", width=50)
+
+    assert tiled.commands == ["[con_id=103] resize set width 50 ppt"]
+    assert tiled_result["requested"] == {"width": 50, "unit": "ppt"}
+
+
+def test_resize_requires_at_least_one_positive_axis_and_rejects_fullscreen():
+    before = load_fixture("tree_mixed.json")
+    client = RuntimeClient([before])
+    with pytest.raises(SwayPluginError, match="at least one") as excinfo:
+        RuntimeService(client).window({"con_id": 108}, "resize")
+    assert excinfo.value.code == "invalid_argument"
+    assert client.commands == []
+
+    fullscreen_tree = updated_node_tree(before, 103, fullscreen_mode=1)
+    fullscreen = RuntimeClient([fullscreen_tree])
+    with pytest.raises(SwayPluginError, match="non-fullscreen") as excinfo:
+        RuntimeService(fullscreen).window({"con_id": 103}, "resize", width=50)
+    assert excinfo.value.code == "precondition_failed"
+    assert fullscreen.commands == []
 
 
 def test_resize_reports_sways_observed_size_instead_of_failing_on_clamping_or_ppt():
@@ -55,10 +97,23 @@ def test_resize_reports_sways_observed_size_instead_of_failing_on_clamping_or_pp
         {"con_id": 108}, "resize", width=50, height=50, unit="ppt"
     )
 
-    assert client.commands == ["[con_id=108] resize set 50 ppt 50 ppt"]
+    assert client.commands == ["[con_id=108] resize set width 50 ppt height 50 ppt"]
     assert result["requested"] == {"width": 50, "height": 50, "unit": "ppt"}
     assert result["observed"]["rect"]["width"] == 960
     assert result["observed"]["rect"]["height"] == 540
+
+
+def test_tiled_resize_reports_a_successful_noop_without_claiming_geometry_changed():
+    before = load_fixture("tree_mixed.json")
+    client = RuntimeClient([before, before])
+
+    result = RuntimeService(client).window({"con_id": 103}, "resize", height=40, unit="ppt")
+
+    assert result["axis_changed"] == {"height": False}
+    assert result["before"] == result["observed"]
+    assert result["warnings"][-1] == (
+        "Sway accepted the resize but no requested axis changed in the fresh geometry"
+    )
 
 
 def test_relative_position_verifies_against_the_focused_workspace_origin():
