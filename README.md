@@ -15,17 +15,22 @@ Linux/Wayland and supports Sway 1.9 only.
 ## Installation
 
 ```bash
-# Install and enable from GitHub
-hermes plugins install lessucettes/hermes-sway-plugin --enable
+# Install and enable from GitHub. Review the security-scan findings first;
+# --force acknowledges a CAUTION verdict for this community source.
+hermes plugins install lessucettes/hermes-sway-plugin --force --enable
 
 # Or inspect and validate a checkout before installing a pinned revision
 git clone https://github.com/lessucettes/hermes-sway-plugin
 cd hermes-sway-plugin
 hermes plugins validate .
 hermes plugins doctor . --ci
-hermes plugins install lessucettes/hermes-sway-plugin --ref <40-character-commit-sha> --no-enable
+hermes plugins install lessucettes/hermes-sway-plugin --force --ref <40-character-commit-sha> --no-enable
 hermes plugins enable sway
 ```
+
+Hermes still blocks a `DANGEROUS` scan verdict; `--force` only confirms that you
+reviewed and accept an overridable `CAUTION` verdict or replaces an existing
+installation.
 
 Confirm registration with:
 
